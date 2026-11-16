@@ -26,6 +26,10 @@
         }
         .login-box h2 { text-align: center; color: var(--accent); letter-spacing: 1px; font-size: 1.8rem; }
         .login-box p { text-align: center; color: #888; font-size: 0.85rem; margin-top: -0.5rem; }
+        .mode-tabs { display: flex; gap: 0.3rem; background: #0f0f13; padding: 0.3rem; border-radius: 10px; border: 1px solid #2a2a35; }
+        .mode-tab { flex: 1; background: transparent; color: #888; padding: 0.6rem 0.3rem; font-size: 0.85rem; }
+        .mode-tab:hover { background: #22222c; color: #fff; }
+        .mode-tab.active, .mode-tab.active:hover { background: var(--accent); color: #fff; }
         input {
             background: #0f0f13; border: 1px solid #2a2a35; color: #fff;
             padding: 0.75rem; border-radius: 8px; outline: none; font-size: 16px;
@@ -219,9 +223,16 @@
         <div class="login-box" onsubmit="event.preventDefault();">
             <h2>PipocaLive</h2>
             <p>Cinema e Transmissão Sincronizada</p>
-            <input type="text" id="username" placeholder="Seu apelido" required autocomplete="off">
-            <input type="text" id="room" placeholder="Nome da sala (ex: sessao1)" required autocomplete="off">
-            <button type="button" onclick="joinRoom()">Entrar na Sala</button>
+            <div class="mode-tabs">
+                <button type="button" class="mode-tab active" id="mode-create" onclick="setMode('create')">🎬 Criar sala nova</button>
+                <button type="button" class="mode-tab" id="mode-join" onclick="setMode('join')">🔑 Entrar em sala</button>
+            </div>
+            <input type="text" id="username" placeholder="Seu apelido" required autocomplete="off" maxlength="30">
+            <input type="text" id="room" placeholder="Nome da nova sala (ex: sessao1)" required autocomplete="off" maxlength="50" onkeypress="if(event.key==='Enter') joinRoom()">
+            <input type="password" id="room-password" placeholder="Defina uma senha (opcional)" autocomplete="off" maxlength="64" onkeypress="if(event.key==='Enter') joinRoom()">
+            <div id="mode-hint" style="color:#666; font-size:0.75rem; text-align:center; margin-top:-0.4rem; line-height:1.4;"></div>
+            <div id="login-error" style="color:#ef4444; font-size:0.85rem; text-align:center; min-height:1.1rem;"></div>
+            <button type="button" id="login-submit" onclick="joinRoom()">Criar e entrar</button>
         </div>
     </div>
 
@@ -382,6 +393,36 @@
             document.getElementById('unmute-overlay').style.display = 'none';
         }
 
+        // 'create' = criar sala nova | 'join' = entrar em sala que já existe
+        let joinMode = 'create';
+        const MODE_TEXT = {
+            create: {
+                room: 'Nome da nova sala (ex: sessao1)',
+                pass: 'Defina uma senha (opcional)',
+                btn: 'Criar e entrar',
+                hint: '💡 Cada sala tem um nome único. Com senha, a sala fica privada; sem senha, qualquer pessoa que souber o nome entra.'
+            },
+            join: {
+                room: 'Nome da sala existente',
+                pass: 'Senha (só se a sala for privada)',
+                btn: 'Entrar na sala',
+                hint: '💡 Digite o nome exato da sala que seus amigos criaram. Se ela for privada, peça a senha ao dono.'
+            }
+        };
+
+        function setMode(mode) {
+            joinMode = mode;
+            const t = MODE_TEXT[mode];
+            document.getElementById('mode-create').classList.toggle('active', mode === 'create');
+            document.getElementById('mode-join').classList.toggle('active', mode === 'join');
+            document.getElementById('room').placeholder = t.room;
+            document.getElementById('room-password').placeholder = t.pass;
+            document.getElementById('login-submit').innerText = t.btn;
+            document.getElementById('mode-hint').innerText = t.hint;
+            document.getElementById('login-error').innerText = '';
+        }
+        setMode('create');
+
         function joinRoom() {
             const userElem = document.getElementById('username');
             const roomElem = document.getElementById('room');
@@ -396,10 +437,14 @@
                 return;
             }
 
-            document.getElementById('login-screen').style.display = 'none';
-            document.getElementById('room-badge').innerText = `Sala: ${currentRoom}`;
+            document.getElementById('login-error').innerText = '';
             document.getElementById('messages').innerHTML = '';
-            socket.emit('join', { username: currentUser, room: currentRoom });
+            socket.emit('join', {
+                username: currentUser,
+                room: currentRoom,
+                password: document.getElementById('room-password').value,
+                mode: joinMode
+            });
         }
 
         function leaveRoom() {
@@ -407,6 +452,32 @@
             if (player && player.stopVideo) player.stopVideo();
             window.location.reload();
         }
+
+        // O servidor aceitou a entrada (sala pública ou senha correta)
+        socket.on('join_ok', () => {
+            document.getElementById('login-screen').style.display = 'none';
+            document.getElementById('room-password').value = '';
+        });
+
+        // O servidor recusou a entrada
+        const JOIN_ERRORS = {
+            room_exists: '⚠️ Já existe uma sala com esse nome. Escolha outro nome ou use "Entrar em sala".',
+            room_not_found: '❌ Sala não encontrada. Confira o nome ou crie uma sala nova.',
+            password_required: '🔒 Esta sala é privada. Digite a senha.',
+            wrong_password: '❌ Senha incorreta.'
+        };
+        socket.on('join_error', (data) => {
+            const pw = document.getElementById('room-password');
+            document.getElementById('login-screen').style.display = 'flex';
+            document.getElementById('login-error').innerText =
+                JOIN_ERRORS[data.reason] || 'Não foi possível entrar na sala.';
+            if (data.reason === 'password_required' || data.reason === 'wrong_password') {
+                pw.value = '';
+                pw.focus();
+            } else {
+                document.getElementById('room').focus();
+            }
+        });
 
         socket.on('kicked', (data) => {
             alert(data.reason);
@@ -483,6 +554,7 @@
         });
 
         socket.on('sync_state', (state) => {
+            document.getElementById('room-badge').innerText = (state.private ? '🔒 ' : '') + `Sala: ${currentRoom}`;
             currentHost = state.host || '';
             mutedUsers = state.muted || [];
             updateHostPermissions();
