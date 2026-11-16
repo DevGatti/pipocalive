@@ -598,7 +598,6 @@
                 document.getElementById('btn-share').innerText = '🛑 Parar';
 
                 socket.emit('screen_status', { room: currentRoom, active: true });
-                await sendOfferToTarget(null);
 
                 localStream.getVideoTracks()[0].onended = () => stopScreenShareLocal();
             } catch (err) {
@@ -607,12 +606,16 @@
         }
 
         async function sendOfferToTarget(targetSid) {
-            if (!localStream) return;
-            const pcId = targetSid || 'broadcast';
-            if (peerConnections[pcId]) peerConnections[pcId].close();
+            if (!localStream || !targetSid) return;
+            
+            // Fecha conexão anterior com este peer específico se existir para limpar o canal
+            if (peerConnections[targetSid]) {
+                peerConnections[targetSid].close();
+                delete peerConnections[targetSid];
+            }
 
             const pc = new RTCPeerConnection(config);
-            peerConnections[pcId] = pc;
+            peerConnections[targetSid] = pc;
 
             localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
@@ -630,13 +633,17 @@
                 }
             };
 
-            const offer = await pc.createOffer();
-            await pc.setLocalDescription(offer);
-            socket.emit('screen_signal', { room: currentRoom, target_sid: targetSid, type: 'offer', sdp: offer });
+            try {
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                socket.emit('screen_signal', { room: currentRoom, target_sid: targetSid, type: 'offer', sdp: offer });
+            } catch (err) {
+                console.error("Erro ao criar offer WebRTC:", err);
+            }
         }
 
         socket.on('request_screen_offer', async (data) => {
-            if (currentUser === currentHost && localStream) {
+            if (currentUser === currentHost && localStream && data.target_sid) {
                 await sendOfferToTarget(data.target_sid);
             }
         });
@@ -661,14 +668,16 @@
         });
 
         socket.on('screen_signal', async (data) => {
-            const senderId = data.sender_sid || 'broadcast';
+            const senderId = data.sender_sid;
+            if (!senderId) return;
+
             if (!peerConnections[senderId]) {
                 const pc = new RTCPeerConnection(config);
                 peerConnections[senderId] = pc;
 
                 pc.onicecandidate = (event) => {
                     if (event.candidate) {
-                        socket.emit('screen_signal', { room: currentRoom, target_sid: data.sender_sid, type: 'candidate', candidate: event.candidate });
+                        socket.emit('screen_signal', { room: currentRoom, target_sid: senderId, type: 'candidate', candidate: event.candidate });
                     }
                 };
 
@@ -682,15 +691,21 @@
             }
 
             const pc = peerConnections[senderId];
-            if (data.type === 'offer') {
-                await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
-                const ans = await pc.createAnswer();
-                await pc.setLocalDescription(ans);
-                socket.emit('screen_signal', { room: currentRoom, target_sid: data.sender_sid, type: 'answer', sdp: ans });
-            } else if (data.type === 'answer') {
-                await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
-            } else if (data.type === 'candidate') {
-                try { await pc.addIceCandidate(new RTCIceCandidate(data.candidate)); } catch (e) {}
+            try {
+                if (data.type === 'offer') {
+                    await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+                    const ans = await pc.createAnswer();
+                    await pc.setLocalDescription(ans);
+                    socket.emit('screen_signal', { room: currentRoom, target_sid: senderId, type: 'answer', sdp: ans });
+                } else if (data.type === 'answer') {
+                    await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+                } else if (data.type === 'candidate') {
+                    if (data.candidate) {
+                        await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+                    }
+                }
+            } catch (e) {
+                console.error("Erro no sinal WebRTC:", e);
             }
         });
 
