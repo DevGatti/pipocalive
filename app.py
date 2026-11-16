@@ -16,6 +16,12 @@ def member_of(room):
     info = sid_to_user.get(request.sid)
     return bool(info) and info['room'] == room and room in rooms_state
 
+MAX_USERS_PER_ROOM = 10  # limite de pessoas por sala, contando com o dono
+
+def room_size(room):
+    """Conexões atuais na sala (conta conexões, não apelidos)."""
+    return sum(1 for info in sid_to_user.values() if info['room'] == room)
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -89,6 +95,12 @@ def on_join(data):
             if not check_password_hash(room_passwords[room], password):
                 emit('join_error', {'reason': 'wrong_password'}, to=request.sid)
                 return
+        # Limite de pessoas (só depois da senha, para não revelar nada a quem não tem acesso)
+        already_in = sid_to_user.get(request.sid, {}).get('room') == room
+        limit = MAX_USERS_PER_ROOM
+        if not already_in and room_size(room) >= limit:
+            emit('join_error', {'reason': 'room_full', 'limit': limit}, to=request.sid)
+            return
 
     join_room(room)
     emit('join_ok', {}, to=request.sid)
