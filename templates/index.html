@@ -661,47 +661,79 @@
             document.getElementById('btn-share').innerText = '🖥️ Tela';
         }
 
+        // Candidatos ICE que chegam antes da conexão estar pronta ficam na fila
+        const pendingCandidates = {};
+
+        function closePeer(sid) {
+            if (peerConnections[sid]) {
+                try { peerConnections[sid].close(); } catch (e) {}
+                delete peerConnections[sid];
+            }
+            delete pendingCandidates[sid];
+        }
+
         socket.on('stop_screen_view', () => {
+            // Fecha as conexões antigas para que o próximo compartilhamento comece limpo
+            Object.keys(peerConnections).forEach(closePeer);
             screenVideoElem.style.display = 'none';
             screenVideoElem.srcObject = null;
             document.getElementById('unmute-overlay').style.display = 'none';
         });
 
+        async function flushCandidates(sid, pc) {
+            const queue = pendingCandidates[sid] || [];
+            pendingCandidates[sid] = [];
+            for (const c of queue) {
+                try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch (e) {}
+            }
+        }
+
         socket.on('screen_signal', async (data) => {
             const senderId = data.sender_sid;
             if (!senderId) return;
 
-            if (!peerConnections[senderId]) {
-                const pc = new RTCPeerConnection(config);
-                peerConnections[senderId] = pc;
-
-                pc.onicecandidate = (event) => {
-                    if (event.candidate) {
-                        socket.emit('screen_signal', { room: currentRoom, target_sid: senderId, type: 'candidate', candidate: event.candidate });
-                    }
-                };
-
-                pc.ontrack = (event) => {
-                    screenVideoElem.srcObject = event.streams[0];
-                    screenVideoElem.style.display = 'block';
-                    screenVideoElem.muted = true;
-                    screenVideoElem.play().catch(() => {});
-                    document.getElementById('unmute-overlay').style.display = 'flex';
-                };
-            }
-
-            const pc = peerConnections[senderId];
             try {
                 if (data.type === 'offer') {
+                    // Toda oferta nova = conexão nova (a antiga pode estar encerrada)
+                    closePeer(senderId);
+                    pendingCandidates[senderId] = [];
+
+                    const pc = new RTCPeerConnection(config);
+                    peerConnections[senderId] = pc;
+
+                    pc.onicecandidate = (event) => {
+                        if (event.candidate) {
+                            socket.emit('screen_signal', { room: currentRoom, target_sid: senderId, type: 'candidate', candidate: event.candidate });
+                        }
+                    };
+
+                    pc.ontrack = (event) => {
+                        screenVideoElem.srcObject = event.streams[0];
+                        screenVideoElem.style.display = 'block';
+                        screenVideoElem.muted = true;
+                        screenVideoElem.play().catch(() => {});
+                        document.getElementById('unmute-overlay').style.display = 'flex';
+                    };
+
                     await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+                    await flushCandidates(senderId, pc);
                     const ans = await pc.createAnswer();
                     await pc.setLocalDescription(ans);
                     socket.emit('screen_signal', { room: currentRoom, target_sid: senderId, type: 'answer', sdp: ans });
-                } else if (data.type === 'answer') {
+                    return;
+                }
+
+                const pc = peerConnections[senderId];
+                if (!pc) return; // sinal de uma conexão que já foi fechada
+
+                if (data.type === 'answer') {
                     await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
-                } else if (data.type === 'candidate') {
-                    if (data.candidate) {
+                    await flushCandidates(senderId, pc);
+                } else if (data.type === 'candidate' && data.candidate) {
+                    if (pc.remoteDescription) {
                         await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+                    } else {
+                        (pendingCandidates[senderId] = pendingCandidates[senderId] || []).push(data.candidate);
                     }
                 }
             } catch (e) {
