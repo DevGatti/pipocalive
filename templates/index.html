@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>PipocaLive — Cinema Sincronizado</title>
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#a855f7">
+    <script>if ('serviceWorker' in navigator) { navigator.serviceWorker.register('/sw.js'); }</script>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <style>
+        :root {
+            --accent: #a855f7;
+            --accent-hover: #9333ea;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', sans-serif; }
+        body { background: #0f0f13; color: #fff; display: flex; flex-direction: column; height: 100dvh; overflow: hidden; }
+        
+        #login-screen {
+            position: fixed; inset: 0; background: #0f0f13; display: flex;
+            align-items: center; justify-content: center; z-index: 100; padding: 1rem;
+        }
+        .login-box {
+            background: #181820; padding: 2.5rem; border-radius: 12px; width: 100%; max-width: 360px;
+            display: flex; flex-direction: column; gap: 1rem; border: 1px solid #2a2a35;
+        }
+        .login-box h2 { text-align: center; color: var(--accent); letter-spacing: 1px; font-size: 1.8rem; }
+        .login-box p { text-align: center; color: #888; font-size: 0.85rem; margin-top: -0.5rem; }
+        input {
+            background: #0f0f13; border: 1px solid #2a2a35; color: #fff;
+            padding: 0.75rem; border-radius: 8px; outline: none; font-size: 16px;
+        }
+        input:focus { border-color: var(--accent); }
+        button {
+            background: var(--accent); color: #fff; border: none; padding: 0.75rem;
+            border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.2s; font-size: 0.9rem;
+            white-space: nowrap;
+        }
+        button:hover { background: var(--accent-hover); }
+        button.secondary { background: #2a2a35; }
+        button.secondary:hover { background: #3d3d4e; }
+        button.danger { background: #ef4444; padding: 0.5rem 0.9rem; font-size: 0.85rem; }
+        button.danger:hover { background: #dc2626; }
+        button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        header {
+            background: #181820; padding: 0.6rem 1.5rem; display: flex;
+            justify-content: space-between; align-items: center; border-bottom: 1px solid #2a2a35; gap: 0.8rem; min-height: 60px;
+        }
+        .header-top { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+        .brand { font-weight: bold; color: var(--accent); font-size: 1.25rem; }
+        .controls-bar { display: flex; gap: 0.5rem; flex: 1; max-width: 650px; align-items: center; }
+        .controls-bar input { flex: 1; min-width: 0; padding: 0.55rem 0.75rem; font-size: 0.9rem; }
+        .controls-bar button { padding: 0.55rem 0.9rem; }
+        .right-menu { display: flex; align-items: center; gap: 0.8rem; }
+
+        .theme-picker { display: flex; gap: 0.35rem; align-items: center; background: #0f0f13; padding: 0.35rem 0.6rem; border-radius: 20px; border: 1px solid #2a2a35; }
+        .theme-dot { width: 16px; height: 16px; border-radius: 50%; cursor: pointer; border: 2px solid transparent; transition: transform 0.15s; }
+        .theme-dot:hover { transform: scale(1.2); }
+        .theme-dot.active { border-color: #fff; }
+        
+        main { display: flex; flex: 1; overflow: hidden; position: relative; }
+        .video-container { flex: 3; background: #000; display: flex; align-items: center; justify-content: center; position: relative; }
+        
+        .video-container.pseudo-fullscreen,
+        .video-container:fullscreen {
+            position: fixed !important;
+            inset: 0 !important;
+            width: 100vw !important;
+            height: 100dvh !important;
+            max-height: none !important;
+            z-index: 9999 !important;
+            background: #000 !important;
+        }
+
+        #player { width: 100%; height: 100%; position: absolute; inset: 0; }
+        
+        #screen-share-video { 
+            width: 100%; height: 100%; object-fit: contain; position: absolute; inset: 0; 
+            background: #000; z-index: 5; display: none; image-rendering: -webkit-optimize-contrast; 
+        }
+
+        #custom-fs-btn {
+            position: absolute; top: 15px; right: 15px; z-index: 60;
+            background: rgba(15, 15, 19, 0.75); border: 1px solid rgba(255, 255, 255, 0.25);
+            color: #fff; padding: 0.45rem 0.75rem; border-radius: 8px;
+            font-size: 0.85rem; cursor: pointer; backdrop-filter: blur(4px);
+            display: flex; align-items: center; gap: 0.35rem;
+        }
+        #custom-fs-btn:hover { background: var(--accent); border-color: var(--accent); }
+
+        #unmute-overlay {
+            position: absolute; top: 15px; left: 50%; transform: translateX(-50%);
+            z-index: 60; background: rgba(0,0,0,0.85); border: 1px solid var(--accent);
+            padding: 0.6rem 1.2rem; border-radius: 30px; display: none; align-items: center; gap: 0.5rem;
+            cursor: pointer; font-weight: bold; font-size: 0.9rem; box-shadow: 0 4px 15px rgba(0,0,0,0.6);
+        }
+
+        #reactions-layer {
+            position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 50;
+        }
+        .floating-emoji {
+            position: absolute; bottom: 15px; font-size: 2.2rem; animation: floatUp 2.5s ease-out forwards;
+        }
+        @keyframes floatUp {
+            0% { transform: translateY(0) scale(0.5); opacity: 0; }
+            20% { opacity: 1; transform: translateY(-40px) scale(1.2); }
+            100% { transform: translateY(-250px) scale(1); opacity: 0; }
+        }
+
+        #twitch-chat-overlay {
+            position: absolute;
+            right: 20px;
+            bottom: 45px;
+            width: 300px;
+            max-width: 45%;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 0.4rem;
+            pointer-events: none;
+            z-index: 55;
+        }
+
+        .floating-chat-msg {
+            background: rgba(15, 15, 19, 0.82);
+            backdrop-filter: blur(5px);
+            border-right: 3px solid var(--accent);
+            padding: 0.45rem 0.8rem;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            color: #fff;
+            max-width: 100%;
+            word-wrap: break-word;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.6);
+            animation: twitchSlideUp 4.5s ease-out forwards;
+        }
+        .floating-chat-msg strong { color: var(--accent); margin-right: 4px; }
+
+        @keyframes twitchSlideUp {
+            0% { transform: translateY(20px); opacity: 0; }
+            10% { transform: translateY(0); opacity: 1; }
+            80% { transform: translateY(-30px); opacity: 1; }
+            100% { transform: translateY(-70px); opacity: 0; }
+        }
+
+        .sidebar {
+            flex: 1; max-width: 350px; background: #181820; border-left: 1px solid #2a2a35;
+            display: flex; flex-direction: column; overflow: hidden;
+        }
+        
+        .sidebar-tabs { display: flex; background: #121216; border-bottom: 1px solid #2a2a35; }
+        .tab-btn { flex: 1; padding: 0.7rem; background: transparent; border: none; color: #888; font-weight: 600; cursor: pointer; border-bottom: 2px solid transparent; border-radius: 0; }
+        .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); background: #181820; }
+        
+        .tab-content { display: none; flex: 1; flex-direction: column; overflow: hidden; }
+        .tab-content.active { display: flex; }
+
+        #messages { flex: 1; padding: 0.8rem; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; }
+        .msg { background: #22222c; padding: 0.5rem 0.7rem; border-radius: 8px; font-size: 0.85rem; word-wrap: break-word; }
+        .msg strong { color: var(--accent); }
+        .msg.system { background: transparent; color: #888; font-style: italic; font-size: 0.75rem; padding: 0.2rem; text-align: center; }
+        .chat-input-area { padding: 0.6rem; border-top: 1px solid #2a2a35; display: flex; flex-direction: column; gap: 0.4rem; background: #181820; }
+        .emoji-bar { display: flex; justify-content: space-around; font-size: 1.2rem; }
+        .emoji-btn { background: none; border: none; cursor: pointer; transition: transform 0.1s; padding: 0.15rem; }
+        .emoji-btn:hover { transform: scale(1.3); background: none; }
+        .chat-row { display: flex; gap: 0.4rem; }
+        .chat-row input { flex: 1; min-width: 0; padding: 0.55rem 0.75rem; }
+        .chat-row button { padding: 0.55rem 1rem; }
+
+        .section-box { padding: 0.8rem; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 0.5rem; }
+        .list-item { background: #22222c; padding: 0.6rem; border-radius: 6px; font-size: 0.85rem; display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
+        .user-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+        
+        .admin-controls { display: flex; gap: 0.3rem; }
+        .admin-btn { padding: 0.3rem 0.5rem; font-size: 0.75rem; border-radius: 4px; background: #2f2f3d; color: #fff; border: none; cursor: pointer; }
+        .admin-btn:hover { background: #424255; }
+        .admin-btn.muted { background: #f59e0b; color: #000; }
+        .admin-btn.kick { background: #ef4444; }
+        .admin-btn.kick:hover { background: #dc2626; }
+
+        @media (max-width: 768px) {
+            header {
+                flex-direction: column;
+                padding: 0.5rem 0.75rem;
+                gap: 0.5rem;
+                align-items: stretch;
+            }
+            .header-top { width: 100%; justify-content: space-between; }
+            .brand { font-size: 1.1rem; }
+            .right-menu { gap: 0.5rem; }
+            #room-badge { display: none; }
+            .controls-bar { max-width: 100%; width: 100%; }
+            .controls-bar input { font-size: 16px; padding: 0.45rem 0.6rem; }
+            .controls-bar button { padding: 0.45rem 0.7rem; font-size: 0.8rem; }
+
+            main { flex-direction: column; }
+            .video-container {
+                flex: none;
+                width: 100%;
+                aspect-ratio: 16 / 9;
+                max-height: 38vh;
+            }
+            .sidebar {
+                max-width: 100%;
+                width: 100%;
+                flex: 1;
+                border-left: none;
+                border-top: 1px solid #2a2a35;
+            }
+            .tab-btn { padding: 0.55rem; font-size: 0.85rem; }
+            .emoji-bar { font-size: 1.1rem; }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="login-screen">
+        <div class="login-box" onsubmit="event.preventDefault();">
+            <h2>PipocaLive</h2>
+            <p>Cinema e Transmissão Sincronizada</p>
+            <input type="text" id="username" placeholder="Seu apelido" required autocomplete="off">
+            <input type="text" id="room" placeholder="Nome da sala (ex: sessao1)" required autocomplete="off">
+            <button type="button" onclick="joinRoom()">Entrar na Sala</button>
+        </div>
+    </div>
+
+    <header>
+        <div class="header-top">
+            <div class="brand">PipocaLive</div>
+            <div class="right-menu">
+                <div class="theme-picker" title="Mudar tema de cor">
+                    <div class="theme-dot active" style="background: #a855f7;" onclick="setTheme('#a855f7', '#9333ea', this)"></div>
+                    <div class="theme-dot" style="background: #10b981;" onclick="setTheme('#10b981', '#059669', this)"></div>
+                    <div class="theme-dot" style="background: #ef4444;" onclick="setTheme('#ef4444', '#dc2626', this)"></div>
+                    <div class="theme-dot" style="background: #3b82f6;" onclick="setTheme('#3b82f6', '#2563eb', this)"></div>
+                </div>
+                <div id="room-badge" style="font-size: 0.85rem; color: #aaa;"></div>
+                <button class="danger" onclick="leaveRoom()">Sair</button>
+            </div>
+        </div>
+        <div class="controls-bar">
+            <input type="text" id="youtube-url" placeholder="Link do YouTube...">
+            <button onclick="addToPlaylist()">+ Fila</button>
+            <button class="secondary" id="btn-share" onclick="toggleScreenShare()">🖥️ Tela</button>
+        </div>
+    </header>
+
+    <main>
+        <div class="video-container" id="vid-container">
+            <button id="custom-fs-btn" onclick="toggleCustomFullscreen()">⛶ Tela Cheia</button>
+            <div id="unmute-overlay" onclick="unmuteVideo()">🔊 Toque aqui para ativar o som</div>
+            <div id="player"></div>
+            <video id="screen-share-video" autoplay playsinline muted></video>
+            <div id="reactions-layer"></div>
+            <div id="twitch-chat-overlay"></div>
+        </div>
+
+        <div class="sidebar">
+            <div class="sidebar-tabs">
+                <button class="tab-btn active" onclick="switchTab('chat', this)">Chat</button>
+                <button class="tab-btn" onclick="switchTab('playlist', this)">Fila (<span id="playlist-count">0</span>)</button>
+                <button class="tab-btn" onclick="switchTab('users', this)">Galera (<span id="users-count">0</span>)</button>
+            </div>
+
+            <!-- TAB CHAT -->
+            <div id="tab-chat" class="tab-content active">
+                <div id="messages"></div>
+                <div class="chat-input-area">
+                    <div class="emoji-bar">
+                        <button class="emoji-btn" onclick="sendReaction('🍿')">🍿</button>
+                        <button class="emoji-btn" onclick="sendReaction('😂')">😂</button>
+                        <button class="emoji-btn" onclick="sendReaction('😮')">😮</button>
+                        <button class="emoji-btn" onclick="sendReaction('❤️')">❤️</button>
+                        <button class="emoji-btn" onclick="sendReaction('🔥')">🔥</button>
+                        <button class="emoji-btn" onclick="sendReaction('💀')">💀</button>
+                    </div>
+                    <div class="chat-row">
+                        <input type="text" id="chat-msg" placeholder="Mensagem..." onkeypress="if(event.key==='Enter') sendMessage()">
+                        <button onclick="sendMessage()">Enviar</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TAB FILA -->
+            <div id="tab-playlist" class="tab-content">
+                <div class="section-box" id="playlist-container">
+                    <div style="color: #666; text-align: center; font-size: 0.85rem; margin-top: 2rem;">A fila está vazia. Adicione um link do YouTube acima!</div>
+                </div>
+                <div style="padding: 0.8rem; border-top: 1px solid #2a2a35;">
+                    <button class="secondary" id="btn-next" style="width: 100%;" onclick="nextVideo()">⏭️ Pular / Próximo Vídeo</button>
+                </div>
+            </div>
+
+            <!-- TAB USUÁRIOS -->
+            <div id="tab-users" class="tab-content">
+                <div class="section-box" id="users-container"></div>
+            </div>
+        </div>
+    </main>
+
+    <script src="https://www.youtube.com/iframe_api"></script>
+    <script>
+        const socket = io();
+        let player;
+        let currentRoom = '';
+        let currentUser = '';
+        let currentHost = '';
+        let mutedUsers = [];
+        let isRemoteAction = false;
+        let isCustomFullscreen = false;
+
+        let localStream = null;
+        let peerConnections = {};
+        const config = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+        const screenVideoElem = document.getElementById('screen-share-video');
+        const vidContainer = document.getElementById('vid-container');
+        const fsBtn = document.getElementById('custom-fs-btn');
+
+        async function toggleCustomFullscreen() {
+            const isNativeFS = document.fullscreenElement || document.webkitFullscreenElement;
+            
+            if (!isNativeFS && !isCustomFullscreen) {
+                if (vidContainer.requestFullscreen) {
+                    try { await vidContainer.requestFullscreen(); } catch(e) {}
+                } else if (vidContainer.webkitRequestFullscreen) {
+                    try { await vidContainer.webkitRequestFullscreen(); } catch(e) {}
+                }
+                vidContainer.classList.add('pseudo-fullscreen');
+                isCustomFullscreen = true;
+                fsBtn.innerText = '✖ Sair';
+            } else {
+                if (document.exitFullscreen && document.fullscreenElement) {
+                    try { await document.exitFullscreen(); } catch(e) {}
+                } else if (document.webkitExitFullscreen && document.webkitExitFullscreen) {
+                    try { await document.webkitExitFullscreen(); } catch(e) {}
+                }
+                vidContainer.classList.remove('pseudo-fullscreen');
+                isCustomFullscreen = false;
+                fsBtn.innerText = '⛶ Tela Cheia';
+            }
+        }
+
+        document.addEventListener('fullscreenchange', () => {
+            if (!document.fullscreenElement) {
+                vidContainer.classList.remove('pseudo-fullscreen');
+                isCustomFullscreen = false;
+                fsBtn.innerText = '⛶ Tela Cheia';
+            }
+        });
+
+        function setTheme(accent, hover, dot) {
+            document.documentElement.style.setProperty('--accent', accent);
+            document.documentElement.style.setProperty('--accent-hover', hover);
+            document.querySelectorAll('.theme-dot').forEach(d => d.classList.remove('active'));
+            dot.classList.add('active');
+        }
+
+        function switchTab(tabName, btn) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+            document.getElementById(`tab-${tabName}`).classList.add('active');
+            btn.classList.add('active');
+        }
+
+        function onYouTubeIframeAPIReady() {
+            player = new YT.Player('player', {
+                height: '100%',
+                width: '100%',
+                videoId: '',
+                playerVars: { 'autoplay': 1, 'controls': 1, 'rel': 0, 'playsinline': 1, 'fs': 0 },
+                events: { 'onStateChange': onPlayerStateChange }
+            });
+        }
+
+        function unmuteVideo() {
+            if (player && player.unMute) {
+                player.unMute();
+                player.setVolume(100);
+            }
+            screenVideoElem.muted = false;
+            document.getElementById('unmute-overlay').style.display = 'none';
+        }
+
+        function joinRoom() {
+            const userElem = document.getElementById('username');
+            const roomElem = document.getElementById('room');
+            
+            if (!userElem || !roomElem) return;
+
+            currentUser = userElem.value.trim();
+            currentRoom = roomElem.value.trim();
+
+            if (!currentUser || !currentRoom) {
+                alert('Por favor, preencha o seu apelido e o nome da sala!');
+                return;
+            }
+
+            document.getElementById('login-screen').style.display = 'none';
+            document.getElementById('room-badge').innerText = `Sala: ${currentRoom}`;
+            document.getElementById('messages').innerHTML = '';
+            socket.emit('join', { username: currentUser, room: currentRoom });
+        }
+
+        function leaveRoom() {
+            stopScreenShareLocal();
+            if (player && player.stopVideo) player.stopVideo();
+            window.location.reload();
+        }
+
+        socket.on('kicked', (data) => {
+            alert(data.reason);
+            window.location.reload();
+        });
+
+        function updateHostPermissions() {
+            const isHost = (currentUser === currentHost);
+            document.getElementById('btn-share').disabled = !isHost;
+            document.getElementById('btn-next').disabled = !isHost;
+            document.getElementById('btn-share').title = isHost ? 'Compartilhar tela' : 'Apenas o Dono da Sala pode compartilhar tela';
+            document.getElementById('btn-next').title = isHost ? 'Pular vídeo' : 'Apenas o Dono da Sala pode pular vídeos';
+        }
+
+        function adminAction(action, targetUser) {
+            if (currentUser !== currentHost) return;
+            if (action === 'kick' && !confirm(`Tem certeza que deseja expulsar ${targetUser}?`)) return;
+            if (action === 'promote' && !confirm(`Passar a coroa de Dono da Sala para ${targetUser}?`)) return;
+            socket.emit('admin_action', { room: currentRoom, action: action, target: targetUser });
+        }
+
+        function extractVideoId(url) {
+            const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
+            const match = url.match(regExp);
+            return (match && match[2].length === 11) ? match[2] : null;
+        }
+
+        function addToPlaylist() {
+            const url = document.getElementById('youtube-url').value;
+            const videoId = extractVideoId(url);
+            if (videoId) {
+                socket.emit('add_to_playlist', { room: currentRoom, video_id: videoId, title: `YouTube (${videoId})` });
+                document.getElementById('youtube-url').value = '';
+            } else {
+                alert('Link do YouTube inválido.');
+            }
+        }
+
+        function nextVideo() {
+            if (currentUser !== currentHost) return;
+            socket.emit('next_video', { room: currentRoom });
+        }
+
+        function onPlayerStateChange(event) {
+            if (isRemoteAction) {
+                isRemoteAction = false;
+                return;
+            }
+            if (currentUser !== currentHost) return;
+
+            const currentTime = player.getCurrentTime ? player.getCurrentTime() : 0;
+            if (event.data === YT.PlayerState.PLAYING) {
+                socket.emit('video_action', { room: currentRoom, action: 'play', time: currentTime });
+            } else if (event.data === YT.PlayerState.PAUSED) {
+                socket.emit('video_action', { room: currentRoom, action: 'pause', time: currentTime });
+            } else if (event.data === YT.PlayerState.ENDED) {
+                nextVideo();
+            }
+        }
+
+        socket.on('load_video', (data) => {
+            stopScreenShareLocal();
+            if (player && player.loadVideoById) {
+                if (data.video_id) {
+                    if (currentUser !== currentHost && player.mute) {
+                        player.mute();
+                        document.getElementById('unmute-overlay').style.display = 'flex';
+                    }
+                    player.loadVideoById(data.video_id);
+                } else {
+                    player.stopVideo();
+                }
+            }
+        });
+
+        socket.on('sync_state', (state) => {
+            currentHost = state.host || '';
+            mutedUsers = state.muted || [];
+            updateHostPermissions();
+
+            if (state.video_id && player && player.loadVideoById) {
+                isRemoteAction = true;
+                if (currentUser !== currentHost && player.mute) {
+                    player.mute();
+                    document.getElementById('unmute-overlay').style.display = 'flex';
+                }
+                player.loadVideoById(state.video_id, state.time);
+                if (!state.playing) setTimeout(() => player.pauseVideo(), 500);
+            }
+            updatePlaylistUI(state.playlist || []);
+            updateUsersUI(state.users || [], currentHost, mutedUsers);
+        });
+
+        socket.on('update_playlist', (data) => {
+            updatePlaylistUI(data.playlist);
+        });
+
+        function updatePlaylistUI(playlist) {
+            const container = document.getElementById('playlist-container');
+            document.getElementById('playlist-count').innerText = playlist.length;
+            if (playlist.length === 0) {
+                container.innerHTML = `<div style="color: #666; text-align: center; font-size: 0.85rem; margin-top: 2rem;">A fila está vazia. Adicione um link do YouTube acima!</div>`;
+                return;
+            }
+            container.innerHTML = '';
+            playlist.forEach((item, index) => {
+                const div = document.createElement('div');
+                div.className = 'list-item';
+                div.innerHTML = `<span class="user-name"><strong>#${index + 1}</strong> ${item.title}</span>${index === 0 ? '<span style="color:var(--accent); font-size:0.75rem;">Tocando</span>' : ''}`;
+                container.appendChild(div);
+            });
+        }
+
+        socket.on('update_users', (data) => {
+            currentHost = data.host || '';
+            mutedUsers = data.muted || [];
+            updateHostPermissions();
+            updateUsersUI(data.users, currentHost, mutedUsers);
+        });
+
+        function updateUsersUI(users, host, mutedList) {
+            const container = document.getElementById('users-container');
+            document.getElementById('users-count').innerText = users.length;
+            container.innerHTML = '';
+            const amIHost = (currentUser === host);
+
+            users.forEach(user => {
+                const isUserHost = (user === host);
+                const isMuted = mutedList.includes(user);
+                const div = document.createElement('div');
+                div.className = 'list-item';
+
+                let controlsHTML = '';
+                if (amIHost && !isUserHost) {
+                    controlsHTML = `
+                        <div class="admin-controls">
+                            <button class="admin-btn ${isMuted ? 'muted' : ''}" title="${isMuted ? 'Desmutar' : 'Mutar no chat'}" onclick="adminAction('mute', '${user}')">${isMuted ? '🔇' : '🔊'}</button>
+                            <button class="admin-btn" title="Dar coroa de Admin" onclick="adminAction('promote', '${user}')">👑</button>
+                            <button class="admin-btn kick" title="Expulsar da sala" onclick="adminAction('kick', '${user}')">🚫</button>
+                        </div>
+                    `;
+                } else if (isUserHost) {
+                    controlsHTML = `<span style="color:var(--accent); font-size:0.75rem; font-weight:bold;">Dono</span>`;
+                }
+
+                div.innerHTML = `<span class="user-name">${isUserHost ? '👑' : (isMuted ? '🔇' : '🟢')} ${user}</span>${controlsHTML}`;
+                container.appendChild(div);
+            });
+        }
+
+        socket.on('sync_action', (data) => {
+            if (!player || !player.getCurrentTime) return;
+            isRemoteAction = true;
+            const diff = Math.abs(player.getCurrentTime() - data.time);
+            if (diff > 1.5) player.seekTo(data.time, true);
+            if (data.action === 'play') player.playVideo();
+            else if (data.action === 'pause') player.pauseVideo();
+        });
+
+        function sendReaction(emoji) {
+            socket.emit('send_reaction', { room: currentRoom, emoji: emoji });
+        }
+
+        socket.on('show_reaction', (data) => {
+            const layer = document.getElementById('reactions-layer');
+            const span = document.createElement('span');
+            span.className = 'floating-emoji';
+            span.innerText = data.emoji;
+            span.style.left = `${Math.random() * 80 + 10}%`;
+            layer.appendChild(span);
+            setTimeout(() => span.remove(), 2500);
+        });
+
+        async function toggleScreenShare() {
+            if (currentUser !== currentHost) return;
+            if (localStream) {
+                stopScreenShareLocal();
+                return;
+            }
+            try {
+                localStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: { width: { ideal: 1920, max: 3840 }, height: { ideal: 1080, max: 2160 }, frameRate: { ideal: 60 } },
+                    audio: true
+                });
+
+                screenVideoElem.srcObject = localStream;
+                screenVideoElem.muted = true;
+                screenVideoElem.style.display = 'block';
+                document.getElementById('btn-share').innerText = '🛑 Parar';
+
+                socket.emit('screen_status', { room: currentRoom, active: true });
+                await sendOfferToTarget(null);
+
+                localStream.getVideoTracks()[0].onended = () => stopScreenShareLocal();
+            } catch (err) {
+                console.error("Erro ao compartilhar tela:", err);
+            }
+        }
+
+        async function sendOfferToTarget(targetSid) {
+            if (!localStream) return;
+            const pcId = targetSid || 'broadcast';
+            if (peerConnections[pcId]) peerConnections[pcId].close();
+
+            const pc = new RTCPeerConnection(config);
+            peerConnections[pcId] = pc;
+
+            localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+            const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+            if (sender) {
+                const parameters = sender.getParameters();
+                if (!parameters.encodings) parameters.encodings = [{}];
+                parameters.encodings[0].maxBitrate = 4000000;
+                sender.setParameters(parameters).catch(e => {});
+            }
+
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    socket.emit('screen_signal', { room: currentRoom, target_sid: targetSid, type: 'candidate', candidate: event.candidate });
+                }
+            };
+
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            socket.emit('screen_signal', { room: currentRoom, target_sid: targetSid, type: 'offer', sdp: offer });
+        }
+
+        socket.on('request_screen_offer', async (data) => {
+            if (currentUser === currentHost && localStream) {
+                await sendOfferToTarget(data.target_sid);
+            }
+        });
+
+        function stopScreenShareLocal() {
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+                localStream = null;
+                socket.emit('screen_status', { room: currentRoom, active: false });
+            }
+            Object.values(peerConnections).forEach(pc => pc.close());
+            peerConnections = {};
+            screenVideoElem.style.display = 'none';
+            screenVideoElem.srcObject = null;
+            document.getElementById('btn-share').innerText = '🖥️ Tela';
+        }
+
+        socket.on('stop_screen_view', () => {
+            screenVideoElem.style.display = 'none';
+            screenVideoElem.srcObject = null;
+            document.getElementById('unmute-overlay').style.display = 'none';
+        });
+
+        socket.on('screen_signal', async (data) => {
+            const senderId = data.sender_sid || 'broadcast';
+            if (!peerConnections[senderId]) {
+                const pc = new RTCPeerConnection(config);
+                peerConnections[senderId] = pc;
+
+                pc.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        socket.emit('screen_signal', { room: currentRoom, target_sid: data.sender_sid, type: 'candidate', candidate: event.candidate });
+                    }
+                };
+
+                pc.ontrack = (event) => {
+                    screenVideoElem.srcObject = event.streams[0];
+                    screenVideoElem.style.display = 'block';
+                    screenVideoElem.muted = true;
+                    screenVideoElem.play().catch(() => {});
+                    document.getElementById('unmute-overlay').style.display = 'flex';
+                };
+            }
+
+            const pc = peerConnections[senderId];
+            if (data.type === 'offer') {
+                await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+                const ans = await pc.createAnswer();
+                await pc.setLocalDescription(ans);
+                socket.emit('screen_signal', { room: currentRoom, target_sid: data.sender_sid, type: 'answer', sdp: ans });
+            } else if (data.type === 'answer') {
+                await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+            } else if (data.type === 'candidate') {
+                try { await pc.addIceCandidate(new RTCIceCandidate(data.candidate)); } catch (e) {}
+            }
+        });
+
+        function sendMessage() {
+            const input = document.getElementById('chat-msg');
+            const msg = input.value.trim();
+            if (!msg) return;
+            socket.emit('send_message', { room: currentRoom, username: currentUser, msg: msg });
+            input.value = '';
+        }
+
+        socket.on('chat_message', (data) => {
+            const box = document.getElementById('messages');
+            const div = document.createElement('div');
+            if (data.user === 'Sistema') {
+                div.className = 'msg system';
+                div.innerText = data.msg;
+            } else {
+                div.className = 'msg';
+                div.innerHTML = `<strong>${data.user}:</strong> ${data.msg}`;
+                
+                const isLandscape = window.innerWidth > window.innerHeight;
+                const isFS = isCustomFullscreen || Boolean(document.fullscreenElement || document.webkitFullscreenElement);
+
+                if (isLandscape && isFS) {
+                    const twitchOverlay = document.getElementById('twitch-chat-overlay');
+                    const floatMsg = document.createElement('div');
+                    floatMsg.className = 'floating-chat-msg';
+                    floatMsg.innerHTML = `<strong>${data.user}:</strong> ${data.msg}`;
+                    
+                    twitchOverlay.appendChild(floatMsg);
+                    
+                    if (twitchOverlay.children.length > 5) {
+                        twitchOverlay.removeChild(twitchOverlay.firstChild);
+                    }
+                    
+                    setTimeout(() => {
+                        if (floatMsg.parentNode) floatMsg.remove();
+                    }, 4500);
+                }
+            }
+            box.appendChild(div);
+            box.scrollTop = box.scrollHeight;
+        });
+    </script>
+</body>
+</html>
