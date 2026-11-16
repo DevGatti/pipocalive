@@ -400,7 +400,7 @@
                 room: 'Nome da nova sala (ex: sessao1)',
                 pass: 'Defina uma senha (opcional)',
                 btn: 'Criar e entrar',
-                hint: '💡 Cada sala tem um nome único. Com senha, a sala fica privada; sem senha, qualquer pessoa que souber o nome entra.'
+                hint: '💡 Cada sala tem um nome único e aceita até 10 pessoas (contando com você). Com senha, a sala fica privada; sem senha, qualquer pessoa que souber o nome entra.'
             },
             join: {
                 room: 'Nome da sala existente',
@@ -470,7 +470,9 @@
             const pw = document.getElementById('room-password');
             document.getElementById('login-screen').style.display = 'flex';
             document.getElementById('login-error').innerText =
-                JOIN_ERRORS[data.reason] || 'Não foi possível entrar na sala.';
+                data.reason === 'room_full'
+                    ? `🚫 Sala cheia: o limite é de ${data.limit} pessoas (contando com o dono).`
+                    : (JOIN_ERRORS[data.reason] || 'Não foi possível entrar na sala.');
             if (data.reason === 'password_required' || data.reason === 'wrong_password') {
                 pw.value = '';
                 pw.focus();
