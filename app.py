@@ -211,6 +211,12 @@ def on_screen_status(data):
         rooms_state[room]['screen_active'] = data['active']
         if not data['active']:
             emit('stop_screen_view', to=room, include_self=False)
+        else:
+            # Ao iniciar um novo compartilhamento, pede ao dono que envie uma
+            # oferta WebRTC para CADA pessoa que já está na sala.
+            for sid, info in list(sid_to_user.items()):
+                if info['room'] == room and sid != request.sid:
+                    emit('request_screen_offer', {'target_sid': sid}, to=request.sid)
 
 @socketio.on('screen_signal')
 def on_screen_signal(data):
@@ -231,5 +237,5 @@ def on_send_message(data):
     emit('chat_message', {'user': username, 'msg': data['msg']}, to=room)
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 5001))
     socketio.run(app, host='0.0.0.0', port=port)
