@@ -160,6 +160,13 @@ def on_disconnect():
                     rooms_state[room]['host'] = None
                     rooms_state[room]['host_sid'] = None
 
+            # Sala vazia: apaga da memória (estado e senha) e libera o nome para uma sala nova.
+            # Conta conexões, não apelidos, para não apagar se ainda houver alguém conectado.
+            if room_size(room) == 0:
+                rooms_state.pop(room, None)
+                room_passwords.pop(room, None)
+                return
+
             emit('update_users', {
                 'users': rooms_state[room]['users'],
                 'host': rooms_state[room]['host'],
