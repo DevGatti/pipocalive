@@ -318,6 +318,7 @@
         let currentRoom = '';
         let currentUser = '';
         let currentHost = '';
+        let savedJoin = null;
         let mutedUsers = [];
         let isRemoteAction = false;
         let isCustomFullscreen = false;
@@ -440,13 +441,21 @@
 
             document.getElementById('login-error').innerText = '';
             document.getElementById('messages').innerHTML = '';
-            socket.emit('join', {
+            savedJoin = {
                 username: currentUser,
                 room: currentRoom,
                 password: document.getElementById('room-password').value,
                 mode: joinMode
-            });
+            };
+            socket.emit('join', savedJoin);
         }
+
+        // No celular o Socket.IO reconecta ao trocar de app ou sair/tornar à internet.
+        // Sem isso o novo sid não entra na sala e o chat pára de chegar.
+        socket.on('connect', () => {
+            if (!savedJoin || !currentRoom) return;
+            socket.emit('join', { ...savedJoin, mode: 'join', rejoin: true });
+        });
 
         function leaveRoom() {
             stopScreenShareLocal();
