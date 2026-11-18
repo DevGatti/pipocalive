@@ -263,10 +263,11 @@ def on_join(data):
         'muted': rooms_state[room]['muted']
     }, to=room)
     
-    emit('chat_message', {
-        'user': 'Sistema',
-        'msg': f'{username} entrou na sessão.'
-    }, to=room)
+    if not data.get('rejoin'):
+        emit('chat_message', {
+            'user': 'Sistema',
+            'msg': f'{username} entrou na sessão.'
+        }, to=room)
 
     if rooms_state[room].get('screen_active') and rooms_state[room].get('host_sid') != request.sid:
         emit('request_screen_offer', {'target_sid': request.sid}, to=rooms_state[room]['host_sid'])
