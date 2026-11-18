@@ -110,6 +110,25 @@ def service_worker():
     js = "self.addEventListener('fetch', function(event) {});"
     return Response(js, mimetype='application/javascript')
 
+def create_room(room, username, host_sid, password):
+    """Cria a sala (usada pelo site e pelo app). Quem cria é o dono e define a senha (opcional)."""
+    rooms_state[room] = {
+        'type': 'youtube',
+        'video_id': '',
+        'time': 0,
+        'playing': True,
+        'playlist': [],
+        'users': [],
+        'muted': [],
+        'host': username,
+        'host_sid': host_sid,
+        'screen_active': False,
+        'phone_active': False,
+        'private': bool(password)
+    }
+    if password:
+        room_passwords[room] = generate_password_hash(password)
+
 def _json_fields():
     data = request.get_json(silent=True) or {}
     return (str(data.get('username', '')).strip()[:30],
@@ -119,12 +138,23 @@ def _json_fields():
 
 @app.route('/api/phone/start', methods=['POST'])
 def phone_start():
-    """O app do celular pede permissão para transmitir. Só o dono da sala consegue."""
+    """O app do celular pede permissão para transmitir. Só o dono da sala consegue.
+    Com create=true o app cria a sala nova (e vira o dono) em vez de entrar numa existente."""
     if not livekit_ready():
         return jsonify(error='livekit_not_configured'), 503
     username, room, password, _ = _json_fields()
+    create = bool((request.get_json(silent=True) or {}).get('create'))
+    if not username or not room:
+        return jsonify(error='room_not_found'), 404
+    if create:
+        if room in rooms_state:
+            return jsonify(error='room_exists'), 409
+        # Ainda sem ninguém conectado pelo site: a sala é apagada depois do prazo de
+        # tolerância, a não ser que a transmissão comece (abaixo) ou alguém entre nela.
+        create_room(room, username, None, password)
+        mark_empty(room)
     state = rooms_state.get(room)
-    if not username or not state:
+    if not state:
         return jsonify(error='room_not_found'), 404
     if room in room_passwords:
         if not password:
@@ -188,23 +218,7 @@ def on_join(data):
             emit('join_error', {'reason': 'room_exists'}, to=request.sid)
             return
         # Cria a sala logo aqui, sem pausa entre a checagem e a criação
-        rooms_state[room] = {
-            'type': 'youtube',
-            'video_id': '',
-            'time': 0,
-            'playing': True,
-            'playlist': [],
-            'users': [],
-            'muted': [],
-            'host': username,
-            'host_sid': request.sid,
-            'screen_active': False,
-            'phone_active': False,
-            'private': bool(password)
-        }
-        # Quem cria a sala define a senha (opcional)
-        if password:
-            room_passwords[room] = generate_password_hash(password)
+        create_room(room, username, request.sid, password)
     else:
         # A sala precisa existir
         if room not in rooms_state:
