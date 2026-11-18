@@ -1,4 +1,6 @@
 import os
+import time
+import secrets
 from flask import Flask, render_template, request, jsonify, Response
 from flask_socketio import SocketIO, emit, join_room
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -21,6 +23,65 @@ MAX_USERS_PER_ROOM = 10  # limite de pessoas por sala, contando com o dono
 def room_size(room):
     """Conexões atuais na sala (conta conexões, não apelidos)."""
     return sum(1 for info in sid_to_user.values() if info['room'] == room)
+
+# ---------------------------------------------------------------------------
+# Sala vazia: some da memória depois de um tempo de tolerância
+# (dá tempo de recarregar a página, trocar de app no celular, a internet cair...)
+# ---------------------------------------------------------------------------
+EMPTY_ROOM_GRACE = 120  # segundos
+empty_since = {}        # sala -> quando ficou vazia
+
+def mark_empty(room):
+    empty_since[room] = time.time()
+
+    def _cleanup():
+        socketio.sleep(EMPTY_ROOM_GRACE)
+        since = empty_since.get(room)
+        if (room in rooms_state and since is not None
+                and room_size(room) == 0 and room not in phone_sessions
+                and time.time() - since >= EMPTY_ROOM_GRACE - 1):
+            rooms_state.pop(room, None)
+            room_passwords.pop(room, None)
+            empty_since.pop(room, None)
+
+    socketio.start_background_task(_cleanup)
+
+# ---------------------------------------------------------------------------
+# Transmissão de tela pelo celular (app Android -> LiveKit Cloud -> espectadores)
+# O LiveKit fica fora do Render: aqui só geramos as permissões de entrada.
+# Variáveis de ambiente no Render: LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET
+# ---------------------------------------------------------------------------
+try:
+    from livekit import api as lk_api
+except Exception:
+    lk_api = None
+
+LIVEKIT_URL = os.environ.get('LIVEKIT_URL', '')
+LIVEKIT_API_KEY = os.environ.get('LIVEKIT_API_KEY', '')
+LIVEKIT_API_SECRET = os.environ.get('LIVEKIT_API_SECRET', '')
+
+phone_sessions = {}  # sala -> chave secreta da transmissão do celular (nunca vai aos navegadores)
+
+def livekit_ready():
+    return bool(lk_api and LIVEKIT_URL and LIVEKIT_API_KEY and LIVEKIT_API_SECRET)
+
+def make_lk_token(identity, room, publish):
+    """Permissão de entrada no LiveKit.
+    publish=True  -> o celular: só pode enviar a tela.
+    publish=False -> espectador: só pode assistir."""
+    kwargs = dict(room_join=True, room=f'pipocalive-{room}',
+                  can_publish=publish, can_subscribe=not publish, can_publish_data=False)
+    if publish:
+        kwargs['can_publish_sources'] = ['screen_share']
+    try:
+        grants = lk_api.VideoGrants(**kwargs)
+    except TypeError:  # versão do SDK sem can_publish_sources
+        kwargs.pop('can_publish_sources', None)
+        grants = lk_api.VideoGrants(**kwargs)
+    return (lk_api.AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
+            .with_identity(identity)
+            .with_grants(grants)
+            .to_jwt())
 
 @app.route('/')
 def index():
@@ -48,6 +109,67 @@ def manifest():
 def service_worker():
     js = "self.addEventListener('fetch', function(event) {});"
     return Response(js, mimetype='application/javascript')
+
+def _json_fields():
+    data = request.get_json(silent=True) or {}
+    return (str(data.get('username', '')).strip()[:30],
+            str(data.get('room', '')).strip()[:50],
+            str(data.get('password', ''))[:64],
+            str(data.get('key', ''))[:100])
+
+@app.route('/api/phone/start', methods=['POST'])
+def phone_start():
+    """O app do celular pede permissão para transmitir. Só o dono da sala consegue."""
+    if not livekit_ready():
+        return jsonify(error='livekit_not_configured'), 503
+    username, room, password, _ = _json_fields()
+    state = rooms_state.get(room)
+    if not username or not state:
+        return jsonify(error='room_not_found'), 404
+    if room in room_passwords:
+        if not password:
+            return jsonify(error='password_required'), 403
+        if not check_password_hash(room_passwords[room], password):
+            return jsonify(error='wrong_password'), 403
+    # Dono da sala. Se a sala está vazia (o dono trocou do navegador para o app e a conexão
+    # do site caiu), ainda dentro do prazo de tolerância, vale o apelido informado.
+    host = state.get('host')
+    if not (host == username or (host is None and room_size(room) == 0)):
+        return jsonify(error='not_host'), 403
+    if state.get('screen_active'):
+        return jsonify(error='screen_busy'), 409
+
+    key = secrets.token_urlsafe(24)
+    phone_sessions[room] = key
+    state['phone_active'] = True
+    socketio.emit('phone_screen', {'active': True}, to=room)
+    return jsonify(url=LIVEKIT_URL, token=make_lk_token(f'phone-{room}', room, True), key=key)
+
+@app.route('/api/phone/stop', methods=['POST'])
+def phone_stop():
+    """O app avisa que parou de transmitir."""
+    _, room, _, key = _json_fields()
+    saved = phone_sessions.get(room)
+    if not saved or not key or not secrets.compare_digest(saved, key):
+        return jsonify(error='invalid_key'), 403
+    phone_sessions.pop(room, None)
+    if room in rooms_state:
+        rooms_state[room]['phone_active'] = False
+        socketio.emit('phone_screen', {'active': False}, to=room)
+        if room_size(room) == 0:
+            mark_empty(room)
+    return jsonify(ok=True)
+
+@socketio.on('phone_view_token')
+def on_phone_view_token(data):
+    """Um espectador que já está na sala pede permissão para assistir ao celular."""
+    room = str((data or {}).get('room', ''))
+    if not member_of(room) or not rooms_state[room].get('phone_active') or not livekit_ready():
+        return
+    emit('phone_view_token', {
+        'url': LIVEKIT_URL,
+        'token': make_lk_token(f'v-{request.sid}', room, False)
+    }, to=request.sid)
 
 @socketio.on('join')
 def on_join(data):
@@ -77,6 +199,7 @@ def on_join(data):
             'host': username,
             'host_sid': request.sid,
             'screen_active': False,
+            'phone_active': False,
             'private': bool(password)
         }
         # Quem cria a sala define a senha (opcional)
@@ -103,6 +226,7 @@ def on_join(data):
             return
 
     join_room(room)
+    empty_since.pop(room, None)  # alguém voltou: cancela a limpeza da sala
     emit('join_ok', {}, to=request.sid)
     
     sid_to_user[request.sid] = {'username': username, 'room': room}
@@ -160,11 +284,10 @@ def on_disconnect():
                     rooms_state[room]['host'] = None
                     rooms_state[room]['host_sid'] = None
 
-            # Sala vazia: apaga da memória (estado e senha) e libera o nome para uma sala nova.
-            # Conta conexões, não apelidos, para não apagar se ainda houver alguém conectado.
+            # Sala vazia: depois de EMPTY_ROOM_GRACE segundos sem ninguém, apaga da memória
+            # (estado e senha) e libera o nome. Conta conexões, não apelidos.
             if room_size(room) == 0:
-                rooms_state.pop(room, None)
-                room_passwords.pop(room, None)
+                mark_empty(room)
                 return
 
             emit('update_users', {
@@ -268,6 +391,10 @@ def on_send_reaction(data):
 def on_screen_status(data):
     room = data['room']
     if member_of(room) and rooms_state[room]['host_sid'] == request.sid:
+        # Uma transmissão por vez: o celular já está transmitindo
+        if data['active'] and rooms_state[room].get('phone_active'):
+            emit('screen_blocked', {}, to=request.sid)
+            return
         rooms_state[room]['screen_active'] = data['active']
         if not data['active']:
             emit('stop_screen_view', to=room, include_self=False)
