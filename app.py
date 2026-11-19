@@ -471,6 +471,19 @@ def on_screen_signal(data):
     else:
         emit('screen_signal', data, to=room, include_self=False)
 
+@socketio.on('quality_request')
+def on_quality_request(data):
+    room = data.get('room') or sid_to_user.get(request.sid, {}).get('room')
+    if not room or room not in rooms_state or not member_of(room):
+        return
+    host_sid = rooms_state[room].get('host_sid')
+    if not host_sid:
+        return
+    emit('quality_request', {
+        'quality': data.get('quality', 'high'),
+        'requester_sid': data.get('requester_sid', '')
+    }, to=host_sid)
+
 @socketio.on('send_message')
 def on_send_message(data):
     room = data['room']
