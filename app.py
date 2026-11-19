@@ -31,6 +31,9 @@ def room_size(room):
 EMPTY_ROOM_GRACE = 120  # segundos
 empty_since = {}        # sala -> quando ficou vazia
 
+HOST_RECONNECT_GRACE = 60
+host_grace_pending = {}
+
 def mark_empty(room):
     empty_since[room] = time.time()
 
@@ -45,6 +48,51 @@ def mark_empty(room):
             empty_since.pop(room, None)
 
     socketio.start_background_task(_cleanup)
+
+def emit_users(room):
+    state = rooms_state.get(room)
+    if not state:
+        return
+    emit('update_users', {
+        'users': state['users'],
+        'host': state['host'],
+        'muted': state['muted']
+    }, to=room)
+
+def resolve_host_after_grace(room, username, disconnected_sid):
+    socketio.sleep(HOST_RECONNECT_GRACE)
+    if not host_grace_pending.get(room):
+        return
+    host_grace_pending.pop(room, None)
+    state = rooms_state.get(room)
+    if not state or state.get('host') != username:
+        return
+    if state.get('host_sid') and state.get('host_sid') != disconnected_sid:
+        return
+    for sid, info in list(sid_to_user.items()):
+        if info.get('room') == room and info.get('username') == username:
+            state['host_sid'] = sid
+            return
+    if state.get('phone_active') and room in phone_sessions:
+        return
+    users = state.get('users') or []
+    if users:
+        new_host = users[0]
+        state['host'] = new_host
+        for sid, info in list(sid_to_user.items()):
+            if info.get('room') == room and info.get('username') == new_host:
+                state['host_sid'] = sid
+                break
+        emit('chat_message', {
+            'user': 'Sistema',
+            'msg': f'👑 {new_host} agora é o Dono da Sala!'
+        }, to=room)
+    else:
+        state['host'] = None
+        state['host_sid'] = None
+    state['screen_active'] = False
+    emit('stop_screen_view', to=room)
+    emit_users(room)
 
 # ---------------------------------------------------------------------------
 # Transmissão de tela pelo celular (app Android -> LiveKit Cloud -> espectadores)
@@ -112,6 +160,7 @@ def service_worker():
 
 def create_room(room, username, host_sid, password):
     """Cria a sala (usada pelo site e pelo app). Quem cria é o dono e define a senha (opcional)."""
+    host_grace_pending.pop(room, None)
     rooms_state[room] = {
         'type': 'youtube',
         'video_id': '',
@@ -255,6 +304,7 @@ def on_join(data):
         rooms_state[room]['host_sid'] = request.sid
     elif rooms_state[room]['host'] == username:
         rooms_state[room]['host_sid'] = request.sid
+        host_grace_pending.pop(room, None)
 
     emit('sync_state', rooms_state[room], to=request.sid)
     emit('update_users', {
@@ -282,22 +332,10 @@ def on_disconnect():
             rooms_state[room]['users'].remove(username)
             
             if rooms_state[room]['host'] == username:
-                rooms_state[room]['screen_active'] = False
-                emit('stop_screen_view', to=room)
-                if rooms_state[room]['users']:
-                    new_host = rooms_state[room]['users'][0]
-                    rooms_state[room]['host'] = new_host
-                    for s, info in sid_to_user.items():
-                        if info['username'] == new_host and info['room'] == room:
-                            rooms_state[room]['host_sid'] = s
-                            break
-                    emit('chat_message', {
-                        'user': 'Sistema',
-                        'msg': f'👑 {new_host} agora é o Dono da Sala!'
-                    }, to=room)
-                else:
-                    rooms_state[room]['host'] = None
-                    rooms_state[room]['host_sid'] = None
+                host_grace_pending[room] = True
+                socketio.start_background_task(
+                    resolve_host_after_grace, room, username, request.sid
+                )
 
             # Sala vazia: depois de EMPTY_ROOM_GRACE segundos sem ninguém, apaga da memória
             # (estado e senha) e libera o nome. Conta conexões, não apelidos.
@@ -326,6 +364,7 @@ def on_admin_action(data):
                 rooms_state[room]['muted'].append(target)
         elif action == 'promote':
             rooms_state[room]['host'] = target
+            host_grace_pending.pop(room, None)
             for s, info in sid_to_user.items():
                 if info['username'] == target and info['room'] == room:
                     rooms_state[room]['host_sid'] = s
