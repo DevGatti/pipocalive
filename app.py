@@ -1,6 +1,7 @@
 import os
 import time
 import secrets
+from datetime import timedelta
 from flask import Flask, render_template, request, jsonify, Response
 from flask_socketio import SocketIO, emit, join_room
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -90,8 +91,6 @@ def resolve_host_after_grace(room, username, disconnected_sid):
     else:
         state['host'] = None
         state['host_sid'] = None
-    state['screen_active'] = False
-    emit('stop_screen_view', to=room)
     emit_users(room)
 
 # ---------------------------------------------------------------------------
@@ -129,6 +128,7 @@ def make_lk_token(identity, room, publish):
     return (lk_api.AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
             .with_identity(identity)
             .with_grants(grants)
+            .with_ttl(timedelta(hours=6))
             .to_jwt())
 
 @app.route('/')
