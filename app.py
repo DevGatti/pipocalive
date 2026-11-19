@@ -8,7 +8,13 @@ from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'pipocalive_secret_key'
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+socketio = SocketIO(
+    app,
+    cors_allowed_origins="*",
+    async_mode='eventlet',
+    ping_interval=10,
+    ping_timeout=5,
+)
 
 rooms_state = {}
 sid_to_user = {}
@@ -323,32 +329,45 @@ def on_join(data):
     if rooms_state[room].get('screen_active') and rooms_state[room].get('host_sid') != request.sid:
         emit('request_screen_offer', {'target_sid': request.sid}, to=rooms_state[room]['host_sid'])
 
+def remove_user_from_room(sid):
+    user_info = sid_to_user.pop(sid, None)
+    if not user_info:
+        return
+
+    username = user_info['username']
+    room = user_info['room']
+    if room not in rooms_state or username not in rooms_state[room]['users']:
+        return
+
+    rooms_state[room]['users'].remove(username)
+
+    if rooms_state[room]['host'] == username:
+        host_grace_pending[room] = True
+        socketio.start_background_task(
+            resolve_host_after_grace, room, username, sid
+        )
+
+    # Sala vazia: depois de EMPTY_ROOM_GRACE segundos sem ninguém, apaga da memória
+    # (estado e senha) e libera o nome. Conta conexões, não apelidos.
+    if room_size(room) == 0:
+        mark_empty(room)
+        return
+
+    emit('update_users', {
+        'users': rooms_state[room]['users'],
+        'host': rooms_state[room]['host'],
+        'muted': rooms_state[room]['muted']
+    }, to=room)
+
+
 @socketio.on('disconnect')
 def on_disconnect():
-    user_info = sid_to_user.pop(request.sid, None)
-    if user_info:
-        username = user_info['username']
-        room = user_info['room']
-        if room in rooms_state and username in rooms_state[room]['users']:
-            rooms_state[room]['users'].remove(username)
-            
-            if rooms_state[room]['host'] == username:
-                host_grace_pending[room] = True
-                socketio.start_background_task(
-                    resolve_host_after_grace, room, username, request.sid
-                )
+    remove_user_from_room(request.sid)
 
-            # Sala vazia: depois de EMPTY_ROOM_GRACE segundos sem ninguém, apaga da memória
-            # (estado e senha) e libera o nome. Conta conexões, não apelidos.
-            if room_size(room) == 0:
-                mark_empty(room)
-                return
 
-            emit('update_users', {
-                'users': rooms_state[room]['users'],
-                'host': rooms_state[room]['host'],
-                'muted': rooms_state[room]['muted']
-            }, to=room)
+@socketio.on('leave')
+def on_leave():
+    remove_user_from_room(request.sid)
 
 @socketio.on('admin_action')
 def on_admin_action(data):
