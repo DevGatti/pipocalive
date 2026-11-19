@@ -594,11 +594,19 @@
             socket.emit('join', { ...savedJoin, mode: 'join', rejoin: true });
         });
 
+        function notifyLeave() {
+            if (currentRoom) socket.emit('leave');
+        }
+
         function leaveRoom() {
             stopScreenShareLocal();
             if (player && player.stopVideo) player.stopVideo();
+            notifyLeave();
             window.location.reload();
         }
+
+        window.addEventListener('pagehide', notifyLeave);
+        window.addEventListener('beforeunload', notifyLeave);
 
         // O servidor aceitou a entrada (sala pública ou senha correta)
         socket.on('join_ok', () => {
