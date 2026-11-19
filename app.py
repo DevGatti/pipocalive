@@ -25,6 +25,10 @@ def member_of(room):
     info = sid_to_user.get(request.sid)
     return bool(info) and info['room'] == room and room in rooms_state
 
+
+def is_host(room):
+    return member_of(room) and rooms_state[room]['host'] == sid_to_user[request.sid]['username']
+
 MAX_USERS_PER_ROOM = 10  # limite de pessoas por sala, contando com o dono
 
 def room_size(room):
@@ -66,6 +70,10 @@ def emit_users(room):
         'muted': state['muted']
     }, to=room)
 
+
+def system_message(room, msg):
+    emit('chat_message', {'user': 'Sistema', 'msg': msg}, to=room)
+
 def resolve_host_after_grace(room, username, disconnected_sid):
     socketio.sleep(HOST_RECONNECT_GRACE)
     if not host_grace_pending.get(room):
@@ -90,10 +98,7 @@ def resolve_host_after_grace(room, username, disconnected_sid):
             if info.get('room') == room and info.get('username') == new_host:
                 state['host_sid'] = sid
                 break
-        emit('chat_message', {
-            'user': 'Sistema',
-            'msg': f'👑 {new_host} agora é o Dono da Sala!'
-        }, to=room)
+        system_message(room, f'👑 {new_host} agora é o Dono da Sala!')
     else:
         state['host'] = None
         state['host_sid'] = None
@@ -314,17 +319,10 @@ def on_join(data):
         host_grace_pending.pop(room, None)
 
     emit('sync_state', rooms_state[room], to=request.sid)
-    emit('update_users', {
-        'users': rooms_state[room]['users'],
-        'host': rooms_state[room]['host'],
-        'muted': rooms_state[room]['muted']
-    }, to=room)
-    
+    emit_users(room)
+
     if not data.get('rejoin'):
-        emit('chat_message', {
-            'user': 'Sistema',
-            'msg': f'{username} entrou na sessão.'
-        }, to=room)
+        system_message(room, f'{username} entrou na sessão.')
 
     if rooms_state[room].get('screen_active') and rooms_state[room].get('host_sid') != request.sid:
         emit('request_screen_offer', {'target_sid': request.sid}, to=rooms_state[room]['host_sid'])
@@ -353,11 +351,7 @@ def remove_user_from_room(sid):
         mark_empty(room)
         return
 
-    emit('update_users', {
-        'users': rooms_state[room]['users'],
-        'host': rooms_state[room]['host'],
-        'muted': rooms_state[room]['muted']
-    }, to=room)
+    emit_users(room)
 
 
 @socketio.on('disconnect')
@@ -374,9 +368,7 @@ def on_admin_action(data):
     room = data['room']
     action = data['action']
     target = data['target']
-    user_info = sid_to_user.get(request.sid)
-    
-    if room in rooms_state and user_info and user_info['room'] == room and rooms_state[room]['host'] == user_info['username']:
+    if is_host(room):
         if action == 'mute':
             if target in rooms_state[room]['muted']:
                 rooms_state[room]['muted'].remove(target)
@@ -389,7 +381,7 @@ def on_admin_action(data):
                 if info['username'] == target and info['room'] == room:
                     rooms_state[room]['host_sid'] = s
                     break
-            emit('chat_message', {'user': 'Sistema', 'msg': f'👑 {target} agora é o Dono da Sala!'}, to=room)
+            system_message(room, f'👑 {target} agora é o Dono da Sala!')
         elif action == 'kick':
             target_sid = None
             for s, info in sid_to_user.items():
@@ -399,11 +391,7 @@ def on_admin_action(data):
             if target_sid:
                 emit('kicked', {'reason': 'Você foi removido pelo Dono da Sala.'}, to=target_sid)
         
-        emit('update_users', {
-            'users': rooms_state[room]['users'],
-            'host': rooms_state[room]['host'],
-            'muted': rooms_state[room]['muted']
-        }, to=room)
+        emit_users(room)
 
 @socketio.on('add_to_playlist')
 def on_add_to_playlist(data):
@@ -426,9 +414,7 @@ def on_add_to_playlist(data):
 @socketio.on('next_video')
 def on_next_video(data):
     room = data['room']
-    user_info = sid_to_user.get(request.sid)
-    
-    if room in rooms_state and user_info and user_info['room'] == room and rooms_state[room]['host'] == user_info['username']:
+    if is_host(room):
         if rooms_state[room]['playlist']:
             rooms_state[room]['playlist'].pop(0)
             if rooms_state[room]['playlist']:
@@ -448,9 +434,7 @@ def on_video_action(data):
     room = data['room']
     action = data['action']
     time = data['time']
-    user_info = sid_to_user.get(request.sid)
-    
-    if room in rooms_state and user_info and user_info['room'] == room and rooms_state[room]['host'] == user_info['username']:
+    if is_host(room):
         rooms_state[room]['time'] = time
         rooms_state[room]['playing'] = (action == 'play')
         emit('sync_action', {'action': action, 'time': time}, to=room, include_self=False)
