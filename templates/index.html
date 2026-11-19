@@ -243,8 +243,10 @@
             <h2>PipocaLive</h2>
             <p>Cinema e Transmissão Sincronizada</p>
             <div class="mode-tabs">
+                {% if not is_app %}
                 <button type="button" class="mode-tab active" id="mode-create" onclick="setMode('create')">🎬 Criar sala nova</button>
-                <button type="button" class="mode-tab" id="mode-join" onclick="setMode('join')">🔑 Entrar em sala</button>
+                {% endif %}
+                <button type="button" class="mode-tab {% if is_app %}active{% endif %}" id="mode-join" onclick="setMode('join')">🔑 Entrar em sala</button>
             </div>
             <input type="text" id="username" placeholder="Seu apelido" required autocomplete="off" maxlength="30">
             <input type="text" id="room" placeholder="Nome da nova sala (ex: sessao1)" required autocomplete="off" maxlength="50" onkeypress="if(event.key==='Enter') joinRoom()">
@@ -272,7 +274,9 @@
         <div class="controls-bar">
             <input type="text" id="youtube-url" placeholder="Link do YouTube...">
             <button onclick="addToPlaylist()">+ Fila</button>
+            {% if not is_app %}
             <button class="secondary" id="btn-share" onclick="toggleScreenShare()">🖥️ Tela</button>
+            {% endif %}
         </div>
     </header>
 
@@ -376,6 +380,11 @@
             screenMuteBtn.textContent = muted ? '🔇' : '🔊';
             const overlay = document.getElementById('unmute-overlay');
             if (overlay) overlay.style.display = muted ? 'flex' : 'none';
+        }
+
+        function setShareBtnText(text) {
+            const b = document.getElementById('btn-share');
+            if (b) b.innerText = text;
         }
 
         function applyQualityToPeer(sid, quality) {
@@ -486,7 +495,7 @@
         }
 
         // 'create' = criar sala nova | 'join' = entrar em sala que já existe
-        let joinMode = 'create';
+        let joinMode = '{{ 'join' if is_app else 'create' }}';
         const MODE_TEXT = {
             create: {
                 room: 'Nome da nova sala (ex: sessao1)',
@@ -505,15 +514,21 @@
         function setMode(mode) {
             joinMode = mode;
             const t = MODE_TEXT[mode];
-            document.getElementById('mode-create').classList.toggle('active', mode === 'create');
-            document.getElementById('mode-join').classList.toggle('active', mode === 'join');
+            const createTabEl = document.getElementById('mode-create');
+            if (createTabEl) createTabEl.classList.toggle('active', mode === 'create');
+            const joinTabEl = document.getElementById('mode-join');
+            if (joinTabEl) joinTabEl.classList.toggle('active', mode === 'join');
             document.getElementById('room').placeholder = t.room;
             document.getElementById('room-password').placeholder = t.pass;
             document.getElementById('login-submit').innerText = t.btn;
             document.getElementById('mode-hint').innerText = t.hint;
             document.getElementById('login-error').innerText = '';
         }
+        {% if is_app %}
+        setMode('join');
+        {% else %}
         setMode('create');
+        {% endif %}
 
         function joinRoom() {
             const userElem = document.getElementById('username');
@@ -588,9 +603,12 @@
 
         function updateHostPermissions() {
             const isHost = (currentUser === currentHost);
-            document.getElementById('btn-share').disabled = !isHost;
+            const shareBtn = document.getElementById('btn-share');
+            if (shareBtn) {
+                shareBtn.disabled = !isHost;
+                shareBtn.title = isHost ? 'Compartilhar tela' : 'Apenas o Dono da Sala pode compartilhar tela';
+            }
             document.getElementById('btn-next').disabled = !isHost;
-            document.getElementById('btn-share').title = isHost ? 'Compartilhar tela' : 'Apenas o Dono da Sala pode compartilhar tela';
             document.getElementById('btn-next').title = isHost ? 'Pular vídeo' : 'Apenas o Dono da Sala pode pular vídeos';
         }
 
@@ -782,7 +800,7 @@
                 screenVideoElem.srcObject = localStream;
                 setScreenMuted(true);
                 setScreenVisible(true);
-                document.getElementById('btn-share').innerText = '🛑 Parar';
+                setShareBtnText('🛑 Parar');
 
                 socket.emit('screen_status', { room: currentRoom, active: true });
 
@@ -852,7 +870,7 @@
                 setScreenVisible(false);
                 screenVideoElem.srcObject = null;
             }
-            document.getElementById('btn-share').innerText = '🖥️ Tela';
+            setShareBtnText('🖥️ Tela');
         }
 
         // Candidatos ICE que chegam antes da conexão estar pronta ficam na fila
