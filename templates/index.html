@@ -849,12 +849,22 @@
         let phoneActive = false;
         let lkRoom = null;
         let lkWaitTimer = null;
+        let phoneAudioTrack = null;
+        let phoneAudioEl = null;
 
         function stopPhoneView() {
             clearTimeout(lkWaitTimer);
             if (lkRoom) {
                 try { lkRoom.disconnect(); } catch (e) {}
                 lkRoom = null;
+            }
+            if (phoneAudioTrack) {
+                try { phoneAudioTrack.detach(); } catch (e) {}
+                phoneAudioTrack = null;
+            }
+            if (phoneAudioEl) {
+                try { phoneAudioEl.remove(); } catch (e) {}
+                phoneAudioEl = null;
             }
             if (!localStream) {
                 screenVideoElem.style.display = 'none';
@@ -879,14 +889,33 @@
             lkRoom = room;
 
             room.on(LivekitClient.RoomEvent.TrackSubscribed, (track) => {
-                if (track.kind !== LivekitClient.Track.Kind.Video) return;
                 clearTimeout(lkWaitTimer);
+                if (track.kind === LivekitClient.Track.Kind.Audio) {
+                    phoneAudioTrack = track;
+                    const audioEl = document.createElement('audio');
+                    audioEl.autoplay = true;
+                    audioEl.playsInline = true;
+                    document.body.appendChild(audioEl);
+                    phoneAudioEl = audioEl;
+                    track.attach(audioEl);
+                    audioEl.play().catch(() => {});
+                    return;
+                }
+                if (track.kind !== LivekitClient.Track.Kind.Video) return;
                 track.attach(screenVideoElem);
                 screenVideoElem.muted = true;
                 screenVideoElem.style.display = 'block';
                 screenVideoElem.play().catch(() => {});
             });
             room.on(LivekitClient.RoomEvent.TrackUnsubscribed, (track) => {
+                if (track.kind === LivekitClient.Track.Kind.Audio) {
+                    if (phoneAudioTrack === track) phoneAudioTrack = null;
+                    if (phoneAudioEl) {
+                        try { phoneAudioEl.remove(); } catch (e) {}
+                        phoneAudioEl = null;
+                    }
+                    return;
+                }
                 if (track.kind !== LivekitClient.Track.Kind.Video) return;
                 track.detach(screenVideoElem);
                 if (!localStream) screenVideoElem.style.display = 'none';
