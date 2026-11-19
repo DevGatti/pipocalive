@@ -133,7 +133,8 @@ def make_lk_token(identity, room, publish):
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    is_app = 'PipocaLiveApp' in request.headers.get('User-Agent', '')
+    return render_template('index.html', is_app=is_app)
 
 @app.route('/manifest.json')
 def manifest():
