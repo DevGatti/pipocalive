@@ -366,6 +366,8 @@
         const screenMuteBtn = document.getElementById('screen-mute-btn');
         const screenFullscreenBtn = document.getElementById('screen-fullscreen-btn');
         const screenQualitySelect = document.getElementById('screen-quality');
+        const unmuteOverlay = document.getElementById('unmute-overlay');
+        const shareBtn = document.getElementById('btn-share');
         let lkRoom = null;
         let lkWaitTimer = null;
         let phoneAudioTrack = null;
@@ -391,26 +393,28 @@
             }
         }
 
+        function clearScreenVideo() {
+            setScreenVisible(false);
+            screenVideoElem.srcObject = null;
+        }
+
         function setScreenMuted(muted) {
             screenVideoElem.muted = muted;
-            if (typeof phoneAudioEl !== 'undefined' && phoneAudioEl) phoneAudioEl.muted = muted;
+            if (phoneAudioEl) phoneAudioEl.muted = muted;
             screenMuteBtn.disabled = false;
             screenMuteBtn.textContent = muted ? '🔇' : '🔊';
-            const overlay = document.getElementById('unmute-overlay');
-            if (overlay) overlay.style.display = muted ? 'flex' : 'none';
+            if (unmuteOverlay) unmuteOverlay.style.display = muted ? 'flex' : 'none';
         }
 
         function setLocalPreviewMuted() {
             screenVideoElem.muted = true;
             screenMuteBtn.disabled = true;
             screenMuteBtn.textContent = '🔇';
-            const overlay = document.getElementById('unmute-overlay');
-            if (overlay) overlay.style.display = 'none';
+            if (unmuteOverlay) unmuteOverlay.style.display = 'none';
         }
 
         function setShareBtnText(text) {
-            const b = document.getElementById('btn-share');
-            if (b) b.innerText = text;
+            if (shareBtn) shareBtn.innerText = text;
         }
 
         function applyQualityToPeer(sid, quality) {
@@ -643,7 +647,6 @@
 
         function updateHostPermissions() {
             const isHost = (currentUser === currentHost);
-            const shareBtn = document.getElementById('btn-share');
             if (shareBtn) {
                 shareBtn.disabled = !isHost;
                 shareBtn.title = isHost ? 'Compartilhar tela' : 'Apenas o Dono da Sala pode compartilhar tela';
@@ -704,7 +707,7 @@
                 if (data.video_id) {
                     if (currentUser !== currentHost && player.mute) {
                         player.mute();
-                        document.getElementById('unmute-overlay').style.display = 'flex';
+                        unmuteOverlay.style.display = 'flex';
                     }
                     player.loadVideoById(data.video_id);
                 } else {
@@ -723,7 +726,7 @@
                 isRemoteAction = true;
                 if (currentUser !== currentHost && player.mute) {
                     player.mute();
-                    document.getElementById('unmute-overlay').style.display = 'flex';
+                    unmuteOverlay.style.display = 'flex';
                 }
                 player.loadVideoById(state.video_id, state.time);
                 if (!state.playing) setTimeout(() => player.pauseVideo(), 500);
@@ -907,10 +910,7 @@
             peerConnections = {};
             screenMuteBtn.disabled = false;
             // Não derruba a imagem se ela vem do celular (ex.: entrou um vídeo novo na fila)
-            if (!lkRoom) {
-                setScreenVisible(false);
-                screenVideoElem.srcObject = null;
-            }
+            if (!lkRoom) clearScreenVideo();
             setShareBtnText('🖥️ Tela');
         }
 
@@ -928,9 +928,8 @@
         socket.on('stop_screen_view', () => {
             // Fecha as conexões antigas para que o próximo compartilhamento comece limpo
             Object.keys(peerConnections).forEach(closePeer);
-            setScreenVisible(false);
-            screenVideoElem.srcObject = null;
-            document.getElementById('unmute-overlay').style.display = 'none';
+            clearScreenVideo();
+            unmuteOverlay.style.display = 'none';
         });
 
         async function flushCandidates(sid, pc) {
@@ -965,7 +964,6 @@
                         setScreenVisible(true);
                         setScreenMuted(true);
                         screenVideoElem.play().catch(() => {});
-                        document.getElementById('unmute-overlay').style.display = 'flex';
                     };
 
                     await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
@@ -1011,10 +1009,7 @@
                 try { phoneAudioEl.remove(); } catch (e) {}
                 phoneAudioEl = null;
             }
-            if (!localStream) {
-                setScreenVisible(false);
-                screenVideoElem.srcObject = null;
-            }
+            if (!localStream) clearScreenVideo();
         }
 
         function requestPhoneView() {
