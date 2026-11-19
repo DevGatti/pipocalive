@@ -92,6 +92,8 @@
             border-radius: 10px; padding: 5px 7px; backdrop-filter: blur(4px);
         }
         #screen-controls.visible { display: flex; }
+        body.pipoca-app #screen-controls { opacity: 0; pointer-events: none; transition: opacity 0.18s ease; }
+        body.pipoca-app #screen-controls.ui-show { opacity: 1; pointer-events: auto; }
         #screen-controls button {
             min-width: 34px; height: 32px; border: 0; border-radius: 7px;
             background: #2a2a35; color: #fff; font-size: 15px; cursor: pointer;
@@ -236,7 +238,7 @@
         }
     </style>
 </head>
-<body>
+<body class="{{ 'pipoca-app' if is_app else '' }}">
 
     <div id="login-screen">
         <div class="login-box" onsubmit="event.preventDefault();">
@@ -368,18 +370,42 @@
         let lkWaitTimer = null;
         let phoneAudioTrack = null;
         let phoneAudioEl = null;
+        let screenControlsTimer = null;
+
+        function showScreenControls() {
+            if (!screenControls.classList.contains('visible')) return;
+            screenControls.classList.add('ui-show');
+            clearTimeout(screenControlsTimer);
+            screenControlsTimer = setTimeout(() => {
+                screenControls.classList.remove('ui-show');
+            }, 3000);
+        }
 
         function setScreenVisible(visible) {
             screenVideoElem.style.display = visible ? 'block' : 'none';
             screenControls.classList.toggle('visible', visible);
+            if (visible) showScreenControls();
+            else {
+                clearTimeout(screenControlsTimer);
+                screenControls.classList.remove('ui-show');
+            }
         }
 
         function setScreenMuted(muted) {
             screenVideoElem.muted = muted;
             if (typeof phoneAudioEl !== 'undefined' && phoneAudioEl) phoneAudioEl.muted = muted;
+            screenMuteBtn.disabled = false;
             screenMuteBtn.textContent = muted ? '🔇' : '🔊';
             const overlay = document.getElementById('unmute-overlay');
             if (overlay) overlay.style.display = muted ? 'flex' : 'none';
+        }
+
+        function setLocalPreviewMuted() {
+            screenVideoElem.muted = true;
+            screenMuteBtn.disabled = true;
+            screenMuteBtn.textContent = '🔇';
+            const overlay = document.getElementById('unmute-overlay');
+            if (overlay) overlay.style.display = 'none';
         }
 
         function setShareBtnText(text) {
@@ -420,6 +446,8 @@
             toggleCustomFullscreen();
         });
         screenQualitySelect.addEventListener('change', () => requestQuality(screenQualitySelect.value));
+        vidContainer.addEventListener('click', showScreenControls);
+        vidContainer.addEventListener('touchstart', showScreenControls, { passive: true });
 
         socket.on('quality_request', (data) => {
             if (currentUser !== currentHost) return;
@@ -487,6 +515,10 @@
         }
 
         function unmuteVideo() {
+            if (localStream && currentUser === currentHost) {
+                setLocalPreviewMuted();
+                return;
+            }
             if (player && player.unMute) {
                 player.unMute();
                 player.setVolume(100);
@@ -798,7 +830,7 @@
                 });
 
                 screenVideoElem.srcObject = localStream;
-                setScreenMuted(true);
+                setLocalPreviewMuted();
                 setScreenVisible(true);
                 setShareBtnText('🛑 Parar');
 
@@ -865,6 +897,7 @@
             }
             Object.values(peerConnections).forEach(pc => pc.close());
             peerConnections = {};
+            screenMuteBtn.disabled = false;
             // Não derruba a imagem se ela vem do celular (ex.: entrou um vídeo novo na fila)
             if (!lkRoom) {
                 setScreenVisible(false);
