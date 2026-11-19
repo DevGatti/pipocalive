@@ -358,6 +358,7 @@
         const fsBtn = document.getElementById('custom-fs-btn');
         const screenControls = document.getElementById('screen-controls');
         const screenMuteBtn = document.getElementById('screen-mute-btn');
+        const screenFullscreenBtn = document.getElementById('screen-fullscreen-btn');
         const screenQualitySelect = document.getElementById('screen-quality');
         let lkRoom = null;
         let lkWaitTimer = null;
@@ -405,6 +406,10 @@
             e.stopPropagation();
             setScreenMuted(!screenVideoElem.muted);
         });
+        screenFullscreenBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggleCustomFullscreen();
+        });
         screenQualitySelect.addEventListener('change', () => requestQuality(screenQualitySelect.value));
 
         socket.on('quality_request', (data) => {
@@ -425,6 +430,7 @@
                 vidContainer.classList.add('pseudo-fullscreen');
                 isCustomFullscreen = true;
                 fsBtn.innerText = '✖ Sair';
+                screenFullscreenBtn.innerText = '✖';
             } else {
                 if (document.exitFullscreen && document.fullscreenElement) {
                     try { await document.exitFullscreen(); } catch(e) {}
@@ -434,6 +440,7 @@
                 vidContainer.classList.remove('pseudo-fullscreen');
                 isCustomFullscreen = false;
                 fsBtn.innerText = '⛶ Tela Cheia';
+                screenFullscreenBtn.innerText = '⛶';
             }
         }
 
@@ -442,6 +449,7 @@
                 vidContainer.classList.remove('pseudo-fullscreen');
                 isCustomFullscreen = false;
                 fsBtn.innerText = '⛶ Tela Cheia';
+                screenFullscreenBtn.innerText = '⛶';
             }
         });
 
