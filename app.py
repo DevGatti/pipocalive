@@ -119,7 +119,7 @@ def make_lk_token(identity, room, publish):
     kwargs = dict(room_join=True, room=f'pipocalive-{room}',
                   can_publish=publish, can_subscribe=not publish, can_publish_data=False)
     if publish:
-        kwargs['can_publish_sources'] = ['screen_share']
+        kwargs['can_publish_sources'] = ['screen_share', 'microphone']
     try:
         grants = lk_api.VideoGrants(**kwargs)
     except TypeError:  # versão do SDK sem can_publish_sources
