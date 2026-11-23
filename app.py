@@ -1,24 +1,36 @@
+import math
 import os
+import re
 import time
 import secrets
 from datetime import timedelta
 from flask import Flask, render_template, request, jsonify, Response
-from flask_socketio import SocketIO, emit, join_room
+from flask_socketio import SocketIO, join_room, leave_room
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'pipocalive_secret_key'
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'pipocalive_secret_key')
 socketio = SocketIO(
     app,
     cors_allowed_origins="*",
     async_mode='eventlet',
-    ping_interval=10,
-    ping_timeout=5,
+    ping_interval=25,
+    ping_timeout=60,
 )
 
 rooms_state = {}
 sid_to_user = {}
 room_passwords = {}  # sala -> hash da senha (nunca é enviado aos clientes)
+
+# Uma queda rápida de internet (ou trocar de app no celular) não pode apagar a
+# pessoa da "Galera": só remove depois da tolerância, se ela não reconectar.
+PRESENCE_GRACE = 10
+LEAVE_GRACE = 3
+pending_leaves = {}  # (sala, apelido) -> sid da conexão que caiu
+
+def as_dict(data):
+    """Evento malformado não pode derrubar o handler com AttributeError."""
+    return data if isinstance(data, dict) else {}
 
 def member_of(room):
     """True se quem enviou o evento realmente entrou nessa sala."""
@@ -27,13 +39,32 @@ def member_of(room):
 
 
 def is_host(room):
-    return member_of(room) and rooms_state[room]['host'] == sid_to_user[request.sid]['username']
+    state = rooms_state.get(room)
+    if not member_of(room) or not state:
+        return False
+    if state.get('host_sid'):
+        return state['host_sid'] == request.sid
+    return state.get('host') == sid_to_user[request.sid]['username']
 
 MAX_USERS_PER_ROOM = 10  # limite de pessoas por sala, contando com o dono
 
-def room_size(room):
-    """Conexões atuais na sala (conta conexões, não apelidos)."""
+def connection_count(room):
+    """Conexões ativas (inclui o sid antigo que ainda não caiu num reconect)."""
     return sum(1 for info in sid_to_user.values() if info['room'] == room)
+
+def room_size(room):
+    return connection_count(room)
+
+def member_count(room):
+    """Pessoas distintas: evita 'sala cheia' durante reconexões."""
+    return len({info['username'] for info in sid_to_user.values() if info['room'] == room})
+
+def member_sids(room, username):
+    return [sid for sid, info in sid_to_user.items()
+            if info['room'] == room and info['username'] == username]
+
+def room_sids(room):
+    return [sid for sid, info in sid_to_user.items() if info['room'] == room]
 
 # ---------------------------------------------------------------------------
 # Sala vazia: some da memória depois de um tempo de tolerância
@@ -42,8 +73,8 @@ def room_size(room):
 EMPTY_ROOM_GRACE = 120  # segundos
 empty_since = {}        # sala -> quando ficou vazia
 
-HOST_RECONNECT_GRACE = 60
-host_grace_pending = {}
+HOST_RECONNECT_GRACE = 20
+host_grace_pending = {}  # sala -> sid do dono que caiu
 
 def mark_empty(room):
     empty_since[room] = time.time()
@@ -57,26 +88,34 @@ def mark_empty(room):
             rooms_state.pop(room, None)
             room_passwords.pop(room, None)
             empty_since.pop(room, None)
+            host_grace_pending.pop(room, None)
+            for key in [k for k in pending_leaves if k[0] == room]:
+                pending_leaves.pop(key, None)
 
     socketio.start_background_task(_cleanup)
+
+def emit_to(target, event, data=None, skip_sid=None):
+    """Funciona dentro de eventos e também de background tasks (sem request context)."""
+    socketio.emit(event, data, to=target, skip_sid=skip_sid, namespace='/')
+
 
 def emit_users(room):
     state = rooms_state.get(room)
     if not state:
         return
-    emit('update_users', {
+    emit_to(room, 'update_users', {
         'users': state['users'],
         'host': state['host'],
         'muted': state['muted']
-    }, to=room)
+    })
 
 
 def system_message(room, msg):
-    emit('chat_message', {'user': 'Sistema', 'msg': msg}, to=room)
+    emit_to(room, 'chat_message', {'user': 'Sistema', 'msg': msg})
 
 def resolve_host_after_grace(room, username, disconnected_sid):
     socketio.sleep(HOST_RECONNECT_GRACE)
-    if not host_grace_pending.get(room):
+    if host_grace_pending.get(room) != disconnected_sid:
         return
     host_grace_pending.pop(room, None)
     state = rooms_state.get(room)
@@ -84,20 +123,21 @@ def resolve_host_after_grace(room, username, disconnected_sid):
         return
     if state.get('host_sid') and state.get('host_sid') != disconnected_sid:
         return
-    for sid, info in list(sid_to_user.items()):
-        if info.get('room') == room and info.get('username') == username:
-            state['host_sid'] = sid
-            return
+    sids = member_sids(room, username)
+    if sids:
+        state['host_sid'] = sids[0]
+        emit_users(room)
+        return
     if state.get('phone_active') and room in phone_sessions:
         return
-    users = state.get('users') or []
+    # Não promove alguém que também já saiu (a lista ainda pode conter pendências)
+    users = [name for name in (state.get('users') or []) if member_sids(room, name)]
     if users:
         new_host = users[0]
         state['host'] = new_host
-        for sid, info in list(sid_to_user.items()):
-            if info.get('room') == room and info.get('username') == new_host:
-                state['host_sid'] = sid
-                break
+        state['muted'] = [m for m in state.get('muted', []) if m != new_host]
+        new_sids = member_sids(room, new_host)
+        state['host_sid'] = new_sids[0] if new_sids else None
         system_message(room, f'👑 {new_host} agora é o Dono da Sala!')
     else:
         state['host'] = None
@@ -173,6 +213,9 @@ def service_worker():
 def create_room(room, username, host_sid, password):
     """Cria a sala (usada pelo site e pelo app). Quem cria é o dono e define a senha (opcional)."""
     host_grace_pending.pop(room, None)
+    for key in [k for k in pending_leaves if k[0] == room]:
+        pending_leaves.pop(key, None)
+    empty_since.pop(room, None)
     rooms_state[room] = {
         'type': 'youtube',
         'video_id': '',
@@ -189,6 +232,8 @@ def create_room(room, username, host_sid, password):
     }
     if password:
         room_passwords[room] = generate_password_hash(password)
+    else:
+        room_passwords.pop(room, None)  # sala nova sem senha não herda a senha antiga
 
 def _json_fields():
     data = request.get_json(silent=True) or {}
@@ -233,7 +278,7 @@ def phone_start():
     key = secrets.token_urlsafe(24)
     phone_sessions[room] = key
     state['phone_active'] = True
-    socketio.emit('phone_screen', {'active': True}, to=room)
+    emit_to(room, 'phone_screen', {'active': True})
     return jsonify(url=LIVEKIT_URL, token=make_lk_token(f'phone-{room}', room, True), key=key)
 
 @app.route('/api/phone/stop', methods=['POST'])
@@ -246,7 +291,7 @@ def phone_stop():
     phone_sessions.pop(room, None)
     if room in rooms_state:
         rooms_state[room]['phone_active'] = False
-        socketio.emit('phone_screen', {'active': False}, to=room)
+        emit_to(room, 'phone_screen', {'active': False})
         if room_size(room) == 0:
             mark_empty(room)
     return jsonify(ok=True)
@@ -254,21 +299,32 @@ def phone_stop():
 @socketio.on('phone_view_token')
 def on_phone_view_token(data):
     """Um espectador que já está na sala pede permissão para assistir ao celular."""
-    room = str((data or {}).get('room', ''))
+    room = str(as_dict(data).get('room', ''))
     if not member_of(room) or not rooms_state[room].get('phone_active') or not livekit_ready():
         return
-    emit('phone_view_token', {
+    emit_to(request.sid, 'phone_view_token', {
         'url': LIVEKIT_URL,
         'token': make_lk_token(f'v-{request.sid}', room, False)
-    }, to=request.sid)
+    })
 
 @socketio.on('join')
 def on_join(data):
+    data = as_dict(data)
     username = str(data.get('username', '')).strip()[:30]
     room = str(data.get('room', '')).strip()[:50]
     password = str(data.get('password', ''))[:64]
     if not username or not room:
         return
+
+    sid = request.sid
+    previous = sid_to_user.get(sid)
+    # Reconectou dentro da tolerância: não é uma chegada nova e não pode gerar
+    # o par "saiu/entrou" no chat nem piscar a lista da Galera.
+    rejoining = bool(data.get('rejoin')) or (room, username) in pending_leaves
+
+    if previous and previous['room'] != room:
+        leave_room(previous['room'])
+        remove_user_from_room(sid)
 
     # 'create' = criar sala nova | 'join' = entrar em sala que já existe
     mode = 'create' if data.get('mode') == 'create' else 'join'
@@ -276,82 +332,107 @@ def on_join(data):
     if mode == 'create':
         # O nome da sala precisa estar livre
         if room in rooms_state:
-            emit('join_error', {'reason': 'room_exists'}, to=request.sid)
+            emit_to(sid, 'join_error', {'reason': 'room_exists'})
             return
         # Cria a sala logo aqui, sem pausa entre a checagem e a criação
-        create_room(room, username, request.sid, password)
+        create_room(room, username, sid, password)
     else:
         # A sala precisa existir
         if room not in rooms_state:
-            emit('join_error', {'reason': 'room_not_found'}, to=request.sid)
+            emit_to(sid, 'join_error', {'reason': 'room_not_found'})
             return
         # Sala privada: exige a senha antes de deixar entrar
         if room in room_passwords:
             if not password:
-                emit('join_error', {'reason': 'password_required'}, to=request.sid)
+                emit_to(sid, 'join_error', {'reason': 'password_required'})
                 return
             if not check_password_hash(room_passwords[room], password):
-                emit('join_error', {'reason': 'wrong_password'}, to=request.sid)
+                emit_to(sid, 'join_error', {'reason': 'wrong_password'})
                 return
-        # Limite de pessoas (só depois da senha, para não revelar nada a quem não tem acesso)
-        already_in = sid_to_user.get(request.sid, {}).get('room') == room
-        limit = MAX_USERS_PER_ROOM
-        if not already_in and room_size(room) >= limit:
-            emit('join_error', {'reason': 'room_full', 'limit': limit}, to=request.sid)
+        # Limite de pessoas (só depois da senha, para não revelar nada a quem não tem acesso).
+        # Conta apelidos distintos: o sid antigo pode ainda estar caindo no reconect.
+        already_in = bool(previous and previous['room'] == room)
+        if not already_in and member_count(room) >= MAX_USERS_PER_ROOM:
+            emit_to(sid, 'join_error', {'reason': 'room_full', 'limit': MAX_USERS_PER_ROOM})
             return
 
+    pending_leaves.pop((room, username), None)  # cancela a remoção agendada
     join_room(room)
     empty_since.pop(room, None)  # alguém voltou: cancela a limpeza da sala
-    emit('join_ok', {}, to=request.sid)
-    
-    sid_to_user[request.sid] = {'username': username, 'room': room}
-    
-    # (a sala já existe aqui: foi criada acima ou já estava criada)
-    
-    if username not in rooms_state[room]['users']:
-        rooms_state[room]['users'].append(username)
-    
-    if not rooms_state[room].get('host'):
-        rooms_state[room]['host'] = username
-        rooms_state[room]['host_sid'] = request.sid
-    elif rooms_state[room]['host'] == username:
-        rooms_state[room]['host_sid'] = request.sid
+    sid_to_user[sid] = {'username': username, 'room': room}
+    state = rooms_state[room]
+
+    if username not in state['users']:
+        state['users'].append(username)
+
+    if not state.get('host'):
+        state['host'] = username
+        state['host_sid'] = sid
+        host_grace_pending.pop(room, None)
+    elif state['host'] == username:
+        state['host_sid'] = sid
         host_grace_pending.pop(room, None)
 
-    emit('sync_state', rooms_state[room], to=request.sid)
+    emit_to(sid, 'join_ok', {})
+    emit_to(sid, 'sync_state', state)
     emit_users(room)
 
-    if not data.get('rejoin'):
+    if not rejoining:
         system_message(room, f'{username} entrou na sessão.')
 
-    if rooms_state[room].get('screen_active') and rooms_state[room].get('host_sid') != request.sid:
-        emit('request_screen_offer', {'target_sid': request.sid}, to=rooms_state[room]['host_sid'])
+    host_sid = state.get('host_sid')
+    if state.get('screen_active') and host_sid and host_sid != sid:
+        emit_to(host_sid, 'request_screen_offer', {'target_sid': sid})
 
-def remove_user_from_room(sid):
+def finalize_leave(room, username, sid, delay):
+    """Remove a pessoa só depois da tolerância, se ela realmente não voltou."""
+    socketio.sleep(delay)
+    if pending_leaves.get((room, username)) != sid:
+        return
+    pending_leaves.pop((room, username), None)
+    if member_sids(room, username):
+        return
+    state = rooms_state.get(room)
+    if not state:
+        return
+
+    if username in state['users']:
+        state['users'].remove(username)
+        system_message(room, f'{username} saiu da sessão.')
+
+    if state.get('host') == username:
+        state['host_sid'] = None
+        host_grace_pending[room] = sid
+        socketio.start_background_task(resolve_host_after_grace, room, username, sid)
+
+    emit_users(room)
+
+    # Sala vazia: depois de EMPTY_ROOM_GRACE segundos sem ninguém, apaga da memória
+    # (estado e senha) e libera o nome.
+    if connection_count(room) == 0:
+        mark_empty(room)
+
+
+def remove_user_from_room(sid, explicit=False):
     user_info = sid_to_user.pop(sid, None)
     if not user_info:
         return
 
     username = user_info['username']
     room = user_info['room']
-    if room not in rooms_state or username not in rooms_state[room]['users']:
+    if room not in rooms_state:
         return
-
-    rooms_state[room]['users'].remove(username)
-
-    if rooms_state[room]['host'] == username:
-        host_grace_pending[room] = True
-        socketio.start_background_task(
-            resolve_host_after_grace, room, username, sid
-        )
-
-    # Sala vazia: depois de EMPTY_ROOM_GRACE segundos sem ninguém, apaga da memória
-    # (estado e senha) e libera o nome. Conta conexões, não apelidos.
-    if room_size(room) == 0:
-        mark_empty(room)
+    # Outra aba/conexão da mesma pessoa ainda está ligada: nada muda na Galera.
+    if member_sids(room, username):
         return
-
-    emit_users(room)
+    key = (room, username)
+    if key in pending_leaves:
+        return
+    pending_leaves[key] = sid
+    socketio.start_background_task(
+        finalize_leave, room, username, sid,
+        LEAVE_GRACE if explicit else PRESENCE_GRACE
+    )
 
 
 @socketio.on('disconnect')
@@ -361,131 +442,192 @@ def on_disconnect():
 
 @socketio.on('leave')
 def on_leave():
-    remove_user_from_room(request.sid)
+    info = sid_to_user.get(request.sid)
+    if info:
+        leave_room(info['room'])
+    remove_user_from_room(request.sid, explicit=True)
 
 @socketio.on('admin_action')
 def on_admin_action(data):
-    room = data['room']
-    action = data['action']
-    target = data['target']
-    if is_host(room):
-        if action == 'mute':
-            if target in rooms_state[room]['muted']:
-                rooms_state[room]['muted'].remove(target)
-            else:
-                rooms_state[room]['muted'].append(target)
-        elif action == 'promote':
-            rooms_state[room]['host'] = target
-            host_grace_pending.pop(room, None)
-            for s, info in sid_to_user.items():
-                if info['username'] == target and info['room'] == room:
-                    rooms_state[room]['host_sid'] = s
-                    break
-            system_message(room, f'👑 {target} agora é o Dono da Sala!')
-        elif action == 'kick':
-            target_sid = None
-            for s, info in sid_to_user.items():
-                if info['username'] == target and info['room'] == room:
-                    target_sid = s
-                    break
-            if target_sid:
-                emit('kicked', {'reason': 'Você foi removido pelo Dono da Sala.'}, to=target_sid)
-        
-        emit_users(room)
+    data = as_dict(data)
+    room = str(data.get('room', ''))
+    action = data.get('action')
+    target = str(data.get('target', '')).strip()[:30]
+    if not target or not is_host(room):
+        return
+    state = rooms_state[room]
+
+    if target not in state['users']:
+        return
+
+    if action == 'mute':
+        muted = state.setdefault('muted', [])
+        if target in muted:
+            muted.remove(target)
+        else:
+            muted.append(target)
+    elif action == 'promote':
+        if target == state.get('host'):
+            return
+        new_sids = member_sids(room, target)
+        if not new_sids:
+            return
+        state['host'] = target
+        state['host_sid'] = new_sids[0]
+        host_grace_pending.pop(room, None)
+        state['muted'] = [m for m in state.get('muted', []) if m != target]
+        system_message(room, f'👑 {target} agora é o Dono da Sala!')
+    elif action == 'kick':
+        if target == state.get('host'):
+            return
+        for sid in member_sids(room, target):
+            emit_to(sid, 'kicked', {'reason': 'Você foi removido pelo Dono da Sala.'})
+            remove_user_from_room(sid, explicit=True)
+            leave_room(room, sid=sid)
+    else:
+        return
+
+    emit_users(room)
 
 @socketio.on('add_to_playlist')
 def on_add_to_playlist(data):
-    room = data['room']
-    video_id = data['video_id']
-    title = data.get('title', 'Vídeo do YouTube')
-    
-    if member_of(room):
-        if not rooms_state[room]['playlist'] and not rooms_state[room]['video_id']:
-            rooms_state[room]['video_id'] = video_id
-            rooms_state[room]['time'] = 0
-            rooms_state[room]['playing'] = True
-            rooms_state[room]['playlist'].append({'video_id': video_id, 'title': title})
-            emit('load_video', {'video_id': video_id}, to=room)
-        else:
-            rooms_state[room]['playlist'].append({'video_id': video_id, 'title': title})
-        
-        emit('update_playlist', {'playlist': rooms_state[room]['playlist']}, to=room)
+    data = as_dict(data)
+    room = str(data.get('room', ''))
+    video_id = str(data.get('video_id', ''))
+    if not member_of(room) or not re.fullmatch(r'[A-Za-z0-9_-]{11}', video_id):
+        return
+    title = str(data.get('title', '')).strip()[:80] or f'YouTube ({video_id})'
+    state = rooms_state[room]
+
+    first = not state['playlist'] and not state['video_id']
+    state['playlist'].append({'video_id': video_id, 'title': title})
+    if first:
+        state['video_id'] = video_id
+        state['time'] = 0
+        state['playing'] = True
+        emit_to(room, 'load_video', {'video_id': video_id})
+
+    emit_to(room, 'update_playlist', {'playlist': state['playlist']})
 
 @socketio.on('next_video')
 def on_next_video(data):
-    room = data['room']
-    if is_host(room):
-        if rooms_state[room]['playlist']:
-            rooms_state[room]['playlist'].pop(0)
-            if rooms_state[room]['playlist']:
-                next_vid = rooms_state[room]['playlist'][0]
-                rooms_state[room]['video_id'] = next_vid['video_id']
-                rooms_state[room]['time'] = 0
-                rooms_state[room]['playing'] = True
-                emit('load_video', {'video_id': next_vid['video_id']}, to=room)
-            else:
-                rooms_state[room]['video_id'] = ''
-                emit('load_video', {'video_id': ''}, to=room)
-                
-            emit('update_playlist', {'playlist': rooms_state[room]['playlist']}, to=room)
+    room = str(as_dict(data).get('room', ''))
+    if not is_host(room):
+        return
+    state = rooms_state[room]
+    if not state['playlist']:
+        return
+
+    state['playlist'].pop(0)
+    if state['playlist']:
+        next_vid = state['playlist'][0]
+        state['video_id'] = next_vid['video_id']
+        state['time'] = 0
+        state['playing'] = True
+        emit_to(room, 'load_video', {'video_id': next_vid['video_id']})
+    else:
+        state['video_id'] = ''
+        emit_to(room, 'load_video', {'video_id': ''})
+
+    emit_to(room, 'update_playlist', {'playlist': state['playlist']})
 
 @socketio.on('video_action')
 def on_video_action(data):
-    room = data['room']
-    action = data['action']
-    time = data['time']
-    if is_host(room):
-        rooms_state[room]['time'] = time
-        rooms_state[room]['playing'] = (action == 'play')
-        emit('sync_action', {'action': action, 'time': time}, to=room, include_self=False)
+    data = as_dict(data)
+    room = str(data.get('room', ''))
+    action = data.get('action')
+    if action not in ('play', 'pause') or not is_host(room):
+        return
+    try:
+        position = float(data.get('time', 0))
+    except (TypeError, ValueError):
+        return
+    if not math.isfinite(position) or position < 0:
+        return
+
+    rooms_state[room]['time'] = position
+    rooms_state[room]['playing'] = (action == 'play')
+    emit_to(room, 'sync_action', {'action': action, 'time': position}, skip_sid=request.sid)
 
 @socketio.on('send_reaction')
 def on_send_reaction(data):
-    if not member_of(data['room']):
+    data = as_dict(data)
+    room = str(data.get('room', ''))
+    emoji = str(data.get('emoji', ''))[:24]
+    if not emoji or not member_of(room):
         return
-    emit('show_reaction', {'emoji': data['emoji']}, to=data['room'])
+    emit_to(room, 'show_reaction', {'emoji': emoji})
 
 @socketio.on('screen_status')
 def on_screen_status(data):
-    room = data['room']
-    if member_of(room) and rooms_state[room]['host_sid'] == request.sid:
-        # Uma transmissão por vez: o celular já está transmitindo
-        if data['active'] and rooms_state[room].get('phone_active'):
-            emit('screen_blocked', {}, to=request.sid)
-            return
-        rooms_state[room]['screen_active'] = data['active']
-        if not data['active']:
-            emit('stop_screen_view', to=room, include_self=False)
-        else:
-            # Ao iniciar um novo compartilhamento, pede ao dono que envie uma
-            # oferta WebRTC para CADA pessoa que já está na sala.
-            for sid, info in list(sid_to_user.items()):
-                if info['room'] == room and sid != request.sid:
-                    emit('request_screen_offer', {'target_sid': sid}, to=request.sid)
+    data = as_dict(data)
+    room = str(data.get('room', ''))
+    active = bool(data.get('active'))
+    state = rooms_state.get(room) if member_of(room) else None
+    if not state or state.get('host_sid') != request.sid:
+        return
+    # Uma transmissão por vez: o celular já está transmitindo
+    if active and state.get('phone_active'):
+        emit_to(request.sid, 'screen_blocked', {})
+        return
+    state['screen_active'] = active
+    if not active:
+        emit_to(room, 'stop_screen_view', skip_sid=request.sid)
+    else:
+        # Ao iniciar um novo compartilhamento, pede ao dono que envie uma
+        # oferta WebRTC para CADA pessoa que já está na sala.
+        for sid in room_sids(room):
+            if sid != request.sid:
+                emit_to(request.sid, 'request_screen_offer', {'target_sid': sid})
 
 @socketio.on('screen_signal')
 def on_screen_signal(data):
-    room = data['room']
+    data = as_dict(data)
+    room = str(data.get('room', ''))
     if not member_of(room):
         return
-    data['sender_sid'] = request.sid
+    signal_type = data.get('type')
+    if signal_type not in ('offer', 'answer', 'candidate'):
+        return
     target_sid = data.get('target_sid')
     if target_sid:
-        emit('screen_signal', data, to=target_sid)
+        # Nunca encaminha sinal para outra sala
+        if target_sid not in sid_to_user or sid_to_user[target_sid]['room'] != room:
+            return
+
+    forward = {'type': signal_type, 'sender_sid': request.sid, 'target_sid': target_sid}
+    if signal_type == 'candidate':
+        candidate = data.get('candidate')
+        if not isinstance(candidate, dict):
+            return
+        forward['candidate'] = {k: candidate[k] for k in
+                                ('candidate', 'sdpMid', 'sdpMLineIndex', 'usernameFragment')
+                                if k in candidate}
     else:
-        emit('screen_signal', data, to=room, include_self=False)
+        sdp = data.get('sdp')
+        if not isinstance(sdp, dict):
+            return
+        forward['sdp'] = {'type': sdp.get('type'), 'sdp': str(sdp.get('sdp', ''))[:200000]}
+
+    if target_sid:
+        emit_to(target_sid, 'screen_signal', forward)
+    else:
+        emit_to(room, 'screen_signal', forward, skip_sid=request.sid)
 
 @socketio.on('send_message')
 def on_send_message(data):
-    room = data['room']
+    data = as_dict(data)
+    room = str(data.get('room', ''))
     if not member_of(room):
         return
     # Usa o apelido registrado no servidor, não o que o navegador mandou
     username = sid_to_user[request.sid]['username']
     if username in rooms_state[room].get('muted', []):
         return
-    msg = str(data.get('msg', ''))[:500]
-    emit('chat_message', {'user': username, 'msg': msg}, to=room)
+    msg = str(data.get('msg', '')).strip()[:500]
+    if not msg:
+        return
+    emit_to(room, 'chat_message', {'user': username, 'msg': msg})
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5001))
