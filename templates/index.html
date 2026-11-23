@@ -85,26 +85,6 @@
             background: #000; z-index: 5; display: none;
         }
 
-        #screen-controls {
-            position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%);
-            z-index: 70; display: none; align-items: center; gap: 6px; max-width: calc(100% - 24px);
-            background: rgba(15, 15, 19, 0.86); border: 1px solid rgba(255,255,255,0.25);
-            border-radius: 10px; padding: 5px 7px; backdrop-filter: blur(4px);
-        }
-        #screen-controls.visible { display: flex; }
-        body.pipoca-app #screen-controls { opacity: 0; pointer-events: none; transition: opacity 0.18s ease; }
-        body.pipoca-app #screen-controls.ui-show { opacity: 1; pointer-events: auto; }
-        #screen-controls button {
-            min-width: 34px; height: 32px; border: 0; border-radius: 7px;
-            background: #2a2a35; color: #fff; font-size: 15px; cursor: pointer;
-            touch-action: manipulation;
-        }
-        #screen-controls button:active { background: #3f3f4d; }
-        #screen-quality {
-            height: 32px; border: 0; border-radius: 7px; padding: 0 6px;
-            background: #2a2a35; color: #fff; font-size: 12px; cursor: pointer;
-        }
-
         #custom-fs-btn {
             position: absolute; top: 15px; right: 15px; z-index: 60;
             background: rgba(15, 15, 19, 0.75); border: 1px solid rgba(255, 255, 255, 0.25);
@@ -288,15 +268,6 @@
             <div id="unmute-overlay" onclick="unmuteVideo()">🔊 Toque aqui para ativar o som</div>
             <div id="player"></div>
             <video id="screen-share-video" autoplay playsinline muted></video>
-            <div id="screen-controls">
-                <button type="button" id="screen-mute-btn" title="Ativar/desativar áudio">🔇</button>
-                <button type="button" id="screen-fullscreen-btn" title="Tela cheia">⛶</button>
-                <select id="screen-quality" title="Qualidade da transmissão">
-                    <option value="high">Qualidade: Alta</option>
-                    <option value="medium">Qualidade: Média</option>
-                    <option value="low">Qualidade: Baixa</option>
-                </select>
-            </div>
             <div id="reactions-layer"></div>
             <div id="twitch-chat-overlay"></div>
         </div>
@@ -362,35 +333,15 @@
         const screenVideoElem = document.getElementById('screen-share-video');
         const vidContainer = document.getElementById('vid-container');
         const fsBtn = document.getElementById('custom-fs-btn');
-        const screenControls = document.getElementById('screen-controls');
-        const screenMuteBtn = document.getElementById('screen-mute-btn');
-        const screenFullscreenBtn = document.getElementById('screen-fullscreen-btn');
-        const screenQualitySelect = document.getElementById('screen-quality');
         const unmuteOverlay = document.getElementById('unmute-overlay');
         const shareBtn = document.getElementById('btn-share');
         let lkRoom = null;
         let lkWaitTimer = null;
         let phoneAudioTrack = null;
         let phoneAudioEl = null;
-        let screenControlsTimer = null;
-
-        function showScreenControls() {
-            if (!screenControls.classList.contains('visible')) return;
-            screenControls.classList.add('ui-show');
-            clearTimeout(screenControlsTimer);
-            screenControlsTimer = setTimeout(() => {
-                screenControls.classList.remove('ui-show');
-            }, 3000);
-        }
 
         function setScreenVisible(visible) {
             screenVideoElem.style.display = visible ? 'block' : 'none';
-            screenControls.classList.toggle('visible', visible);
-            if (visible) showScreenControls();
-            else {
-                clearTimeout(screenControlsTimer);
-                screenControls.classList.remove('ui-show');
-            }
         }
 
         function clearScreenVideo() {
@@ -401,63 +352,17 @@
         function setScreenMuted(muted) {
             screenVideoElem.muted = muted;
             if (phoneAudioEl) phoneAudioEl.muted = muted;
-            screenMuteBtn.disabled = false;
-            screenMuteBtn.textContent = muted ? '🔇' : '🔊';
             if (unmuteOverlay) unmuteOverlay.style.display = muted ? 'flex' : 'none';
         }
 
         function setLocalPreviewMuted() {
             screenVideoElem.muted = true;
-            screenMuteBtn.disabled = true;
-            screenMuteBtn.textContent = '🔇';
             if (unmuteOverlay) unmuteOverlay.style.display = 'none';
         }
 
         function setShareBtnText(text) {
             if (shareBtn) shareBtn.innerText = text;
         }
-
-        function applyQualityToPeer(sid, quality) {
-            const pc = peerConnections[sid];
-            if (!pc) return;
-            const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
-            if (!sender) return;
-            const presets = {
-                low: { maxBitrate: 800000, maxFramerate: 15, scaleResolutionDownBy: 2 },
-                medium: { maxBitrate: 1800000, maxFramerate: 30, scaleResolutionDownBy: 1.5 },
-                high: { maxBitrate: 4000000, maxFramerate: 60, scaleResolutionDownBy: 1 }
-            };
-            const params = sender.getParameters();
-            if (!params.encodings) params.encodings = [{}];
-            Object.assign(params.encodings[0], presets[quality] || presets.high);
-            sender.setParameters(params).catch(() => {});
-        }
-
-        function requestQuality(quality) {
-            socket.emit('quality_request', {
-                room: currentRoom,
-                requester_sid: currentUser === currentHost ? '' : socket.id,
-                quality: quality
-            });
-        }
-
-        screenMuteBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            setScreenMuted(!screenVideoElem.muted);
-        });
-        screenFullscreenBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            toggleCustomFullscreen();
-        });
-        screenQualitySelect.addEventListener('change', () => requestQuality(screenQualitySelect.value));
-        vidContainer.addEventListener('click', showScreenControls);
-        vidContainer.addEventListener('touchstart', showScreenControls, { passive: true });
-
-        socket.on('quality_request', (data) => {
-            if (currentUser !== currentHost) return;
-            if (data.requester_sid) applyQualityToPeer(data.requester_sid, data.quality);
-            else Object.keys(peerConnections).forEach(sid => applyQualityToPeer(sid, data.quality));
-        });
 
         async function toggleCustomFullscreen() {
             const isNativeFS = document.fullscreenElement || document.webkitFullscreenElement;
@@ -471,7 +376,6 @@
                 vidContainer.classList.add('pseudo-fullscreen');
                 isCustomFullscreen = true;
                 fsBtn.innerText = '✖ Sair';
-                screenFullscreenBtn.innerText = '✖';
             } else {
                 if (document.exitFullscreen && document.fullscreenElement) {
                     try { await document.exitFullscreen(); } catch(e) {}
@@ -481,7 +385,6 @@
                 vidContainer.classList.remove('pseudo-fullscreen');
                 isCustomFullscreen = false;
                 fsBtn.innerText = '⛶ Tela Cheia';
-                screenFullscreenBtn.innerText = '⛶';
             }
         }
 
@@ -490,7 +393,6 @@
                 vidContainer.classList.remove('pseudo-fullscreen');
                 isCustomFullscreen = false;
                 fsBtn.innerText = '⛶ Tela Cheia';
-                screenFullscreenBtn.innerText = '⛶';
             }
         });
 
@@ -908,7 +810,6 @@
             }
             Object.values(peerConnections).forEach(pc => pc.close());
             peerConnections = {};
-            screenMuteBtn.disabled = false;
             // Não derruba a imagem se ela vem do celular (ex.: entrou um vídeo novo na fila)
             if (!lkRoom) clearScreenVideo();
             setShareBtnText('🖥️ Tela');
